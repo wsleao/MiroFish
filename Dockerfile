@@ -11,4 +11,4 @@ COPY ./backend /app/backend
 EXPOSE 10000
 
 # Executa diretamente o nosso script de orquestração
-CMD ["uvicorn", "backend.run.py:app", "--host", "0.0.0.0", "--port", "10000"]
+CMD ["uvicorn", "backend.run:app", "--host", "0.0.0.0", "--port", "10000"]
