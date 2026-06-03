@@ -3,7 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Força a instalação limpa e sem cache de todas as dependências obrigatórias
-RUN pip install --no-cache-dir fastapi uvicorn openai neo4j asyncpg
+RUN pip install --no-cache-dir fastapi uvicorn openai neo4j asyncpg python-multipart
 
 # Copia a pasta do backend com os scripts para o container
 COPY ./backend /app/backend
