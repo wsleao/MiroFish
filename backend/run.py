@@ -16,7 +16,7 @@ BASE_URL = os.getenv("OPENAI_API_BASE", "https://groq.com")
 MODEL = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
 TOTAL_AGENTS = 3000
 
-# Strings de conexão dos bancos de dados (Configure no painel Environment do Render)
+# Strings de conexão coletadas com segurança do ambiente do Render
 POSTGRES_URL = os.getenv("EXTERNAL_DB_URL")
 neo4j_driver = GraphDatabase.driver(
     os.getenv("NEO4J_URI"), 
@@ -25,7 +25,7 @@ neo4j_driver = GraphDatabase.driver(
 ai_client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 async def simulate_agent_turn(agent_id, session):
-    """Processa um único agente controlando o uso de tokens (TPM)"""
+    """Processa um único agente controlando rigidamente o uso de tokens (TPM)"""
     try:
         result = session.run(
             "MATCH (a:Agent {id: $id}) RETURN a.memory AS mem, a.personality AS pers", 
@@ -43,7 +43,7 @@ async def simulate_agent_turn(agent_id, session):
             ],
             max_tokens=60
         )
-        new_memory = response.choices[0].message.content
+        new_memory = response.choices.message.content
 
         session.run(
             "MATCH (a:Agent {id: $id}) SET a.memory = $mem", 
@@ -53,7 +53,7 @@ async def simulate_agent_turn(agent_id, session):
         print(f"Erro no agente {agent_id}: {e}", flush=True)
 
 async def run_simulation_loop():
-    """Loop eterno fragmentado para respeitar as cotas gratuitas da Groq"""
+    """Loop eterno fragmentado para respeitar as cotas gratuitas da Groq (TPM/RPM)"""
     await asyncio.sleep(5)
     MICRO_BATCH_SIZE = 2      
     PAUSE_BETWEEN_BATCHES = 15.0 
@@ -85,6 +85,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Libera o CORS para o seu painel da Vercel conseguir fazer as requisições
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -94,41 +95,43 @@ app.add_middleware(
 )
 
 # ==========================================
-# 3. EXTRAÇÃO ASSÍNCRONA DO POSTGRESQL
+# 2. EXTRAÇÃO ASSÍNCRONA DO POSTGRESQL (SCHEMA)
 # ==========================================
 async def buscar_dados_do_postgres() -> str:
-    """Conecta no banco Postgres público e puxa a última linha registrada"""
+    """Conecta no banco Postgres público e puxa a última linha do schema scadiadalbertobackes"""
     if not POSTGRES_URL:
         return "Erro: Link do Postgres externo não configurado no Render."
     try:
         conn = await asyncpg.connect(POSTGRES_URL)
-        # ATENÇÃO: Ajuste 'sua_tabela' e 'conteudo_texto' conforme a estrutura do seu banco
-        query = "SELECT conteudo_texto FROM sua_tabela ORDER BY id DESC LIMIT 1;"
+        
+        # Aponta explicitamente para o schema e a tabela fornecidos
+        query = "SELECT conteudo_texto FROM scadiadalbertobackes.sua_tabela ORDER BY id DESC LIMIT 1;"
+        
         row = await conn.fetchrow(query)
         await conn.close()
         
         if row and row["conteudo_texto"]:
             return str(row["conteudo_texto"])
-        return "Tabela vazia ou formato incorreto no Postgres externo."
+        return "A tabela scadiadalbertobackes.sua_tabela está vazia ou sem dados estruturados."
     except Exception as e:
-        return f"Falha ao ler o Postgres externo: {e}"
+        return f"Falha ao ler o schema scadiadalbertobackes: {e}"
 
 # ==========================================
-# 4. ROTA DE ATUALIZAÇÃO INTELIGENTE (MULTI-FONTE)
+# 3. ROTA DE ATUALIZAÇÃO INTELIGENTE (MULTI-FONTE)
 # ==========================================
 @app.post("/update-scenario")
 async def update_scenario(
     prompt: str = Form(...),
-    source_type: str = Form(...), # Define a escolha: 'file' ou 'postgres'
+    source_type: str = Form(...), # Define a escolha vinda do painel: 'file' ou 'postgres'
     file: Optional[UploadFile] = File(None)
 ):
     """
-    Rota central adaptável. Lê o parâmetro source_type vindo do Frontend 
+    Rota adaptável. Lê o parâmetro source_type vindo do Frontend 
     e decide de onde extrair a carga de dados para o enxame de 3.000 agentes.
     """
     contexto_adicional = ""
 
-    # CASO 1: O usuário escolheu usar um banco de dados PostgreSQL
+    # CASO 1: O usuário escolheu usar as tabelas do PostgreSQL público
     if source_type == "postgres":
         print("[MiroFish] Fonte detectada: Banco de Dados PostgreSQL", flush=True)
         contexto_adicional = await buscar_dados_do_postgres()
@@ -142,10 +145,10 @@ async def update_scenario(
     else:
         contexto_adicional = "Nenhuma fonte de dados secundária foi acoplada."
 
-    # Junta a diretriz com a massa de dados coletada
+    # Junta a diretriz digitada com a massa de dados coletada da fonte escolhida
     contexto_final = f"{prompt}\n\n[Carga de Contexto Vinculada]:\n{contexto_adicional}"
 
-    # Salva em lote no Neo4j AuraDB para mudar a mente de todos os agentes
+    # Salva em lote no Neo4j AuraDB para mudar as mentes dos 3.000 agentes de uma vez só
     with neo4j_driver.session() as session:
         session.run(
             "MATCH (a:Agent) SET a.personality = $prompt, a.memory = $contexto", 
