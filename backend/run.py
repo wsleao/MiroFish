@@ -40,7 +40,7 @@ async def simulate_agent_turn(agent_id, session):
             ],
             max_tokens=100
         )
-        new_memory = response.choices.message.content
+        new_memory = response.choices[0].message.content
 
         # Grava de volta a resposta no Neo4j AuraDB
         session.run(
