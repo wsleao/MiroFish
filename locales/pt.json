@@ -1,0 +1,15 @@
+{
+  "title": "MiroFish - Motor de Inteligência Coletiva",
+  "dashboard": "Painel de Controle",
+  "agents": "Agentes Ativos",
+  "runSimulation": "Iniciar Simulação",
+  "stopSimulation": "Parar Simulação",
+  "promptLabel": "Injeção de Cenário / Diretriz Macro",
+  "fileUpload": "Upload de Contexto (.txt, .csv)",
+  "extractReport": "Extrair Relatório do Enxame",
+  "statusActive": "Ativo (3.000 Agentes)",
+  "settings": "Configurações do Sistema",
+  "refreshData": "Atualizar Dados",
+  "noData": "Aguardando extração de dados da simulação...",
+  "language": "Idioma"
+}
