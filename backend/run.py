@@ -1,6 +1,4 @@
-from pathlib import Path
-
-code = r'''import os
+import os
 import asyncio
 import asyncpg
 from contextlib import asynccontextmanager
@@ -140,13 +138,9 @@ def create_task_response(
         "success": True,
         "status": status,
         "message": message,
-
-        # Formato direto
         "task_id": task_id,
         "id": task_id,
         "project_id": project_id,
-
-        # Formatos esperados por frontends diferentes
         "data": task_payload,
         "result": task_payload
     }
@@ -486,87 +480,7 @@ def health_check():
 
 
 # ==========================================
-# 7. ROTAS COMPATÍVEIS COM ONTOLOGIA
-# ==========================================
-
-@app.post("/api/graph/ontology/generate")
-async def generate_ontology_compat(request: Request):
-    """
-    Corrige o 404 da rota esperada pelo frontend:
-    POST /api/graph/ontology/generate
-    """
-
-    payload = await parse_request_payload(request)
-    uploaded_file = await get_first_uploaded_file_from_request(request)
-
-    prompt = str(
-        payload.get("prompt")
-        or payload.get("scenario")
-        or payload.get("description")
-        or payload.get("project_description")
-        or payload.get("content")
-        or "Gerar ontologia a partir dos dados enviados."
-    )
-
-    source_type = str(
-        payload.get("source_type")
-        or payload.get("sourceType")
-        or payload.get("type")
-        or ("upload" if uploaded_file else "text")
-    )
-
-    result = await process_update_scenario(
-        prompt=prompt,
-        source_type=source_type,
-        file=uploaded_file
-    )
-
-    project_id = get_project_id(payload)
-
-    task_response = create_task_response(
-        task_type="ontology_generate",
-        project_id=project_id,
-        status="completed",
-        message="Ontology generation completed successfully."
-    )
-
-    task_id = task_response["task_id"]
-
-    ontology_payload = {
-        "task_id": task_id,
-        "id": task_id,
-        "project_id": project_id,
-        "ontology_id": f"ontology-{project_id}",
-        "status": "completed",
-        "result": result
-    }
-
-    BUILD_TASKS[task_id].update(ontology_payload)
-
-    return {
-        "success": True,
-        "status": "success",
-        "message": "Ontology generation routed successfully.",
-
-        # Formato direto
-        "task_id": task_id,
-        "id": task_id,
-        "project_id": project_id,
-        "ontology_id": f"ontology-{project_id}",
-
-        # Formatos usados por frontends Axios
-        "data": ontology_payload,
-        "result": ontology_payload
-    }
-
-
-@app.get("/api/graph/ontology/status/{task_id}")
-async def ontology_status_by_id(task_id: str):
-    return await graph_build_status_by_id(task_id)
-
-
-# ==========================================
-# 8. BUILD DO GRAFO
+# 7. BUILD DO GRAFO
 # ==========================================
 
 async def execute_graph_build_task(task_id: str, payload: dict | None = None):
@@ -790,7 +704,237 @@ async def graph_build_status():
 
 
 # ==========================================
+# 8. ROTAS COMPATÍVEIS COM ONTOLOGIA
+# ==========================================
+
+@app.post("/api/graph/ontology/generate")
+async def generate_ontology_compat(request: Request):
+    """
+    Corrige o 404 da rota esperada pelo frontend:
+    POST /api/graph/ontology/generate
+    """
+
+    payload = await parse_request_payload(request)
+    uploaded_file = await get_first_uploaded_file_from_request(request)
+
+    prompt = str(
+        payload.get("prompt")
+        or payload.get("scenario")
+        or payload.get("description")
+        or payload.get("project_description")
+        or payload.get("content")
+        or "Gerar ontologia a partir dos dados enviados."
+    )
+
+    source_type = str(
+        payload.get("source_type")
+        or payload.get("sourceType")
+        or payload.get("type")
+        or ("upload" if uploaded_file else "text")
+    )
+
+    result = await process_update_scenario(
+        prompt=prompt,
+        source_type=source_type,
+        file=uploaded_file
+    )
+
+    project_id = get_project_id(payload)
+
+    task_response = create_task_response(
+        task_type="ontology_generate",
+        project_id=project_id,
+        status="completed",
+        message="Ontology generation completed successfully."
+    )
+
+    task_id = task_response["task_id"]
+
+    ontology_payload = {
+        "task_id": task_id,
+        "id": task_id,
+        "project_id": project_id,
+        "ontology_id": f"ontology-{project_id}",
+        "status": "completed",
+        "result": result
+    }
+
+    BUILD_TASKS[task_id].update(ontology_payload)
+
+    return {
+        "success": True,
+        "status": "success",
+        "message": "Ontology generation routed successfully.",
+        "task_id": task_id,
+        "id": task_id,
+        "project_id": project_id,
+        "ontology_id": f"ontology-{project_id}",
+        "data": ontology_payload,
+        "result": ontology_payload
+    }
+
+
+@app.get("/api/graph/ontology/status/{task_id}")
+async def ontology_status_by_id(task_id: str):
+    return await graph_build_status_by_id(task_id)
+
+
+# ==========================================
 # 9. HISTÓRICO / PROJETOS / SIMULAÇÃO
 # ==========================================
 
 @app.get("/api/simulation/history")
+async def simulation_history(limit: int = 20):
+    return {
+        "success": True,
+        "count": 0,
+        "data": [],
+        "result": []
+    }
+
+
+@app.get("/api/projects/history")
+async def projects_history(limit: int = 20):
+    return {
+        "success": True,
+        "count": 0,
+        "data": [],
+        "result": []
+    }
+
+
+@app.get("/api/graph/projects/history")
+async def graph_projects_history(limit: int = 20):
+    return {
+        "success": True,
+        "count": 0,
+        "data": [],
+        "result": []
+    }
+
+
+@app.get("/api/projects")
+async def projects_list(limit: int = 20):
+    return {
+        "success": True,
+        "count": 0,
+        "data": [],
+        "result": []
+    }
+
+
+@app.post("/api/simulation/start")
+async def start_simulation():
+    """
+    Inicia uma rodada em background manualmente.
+
+    Atenção: este endpoint cria um loop contínuo.
+    Use com cuidado em plano gratuito do Render/Groq.
+    """
+
+    asyncio.create_task(run_simulation_loop())
+
+    task_response = create_task_response(
+        task_type="simulation_loop",
+        project_id="render-project",
+        status="running",
+        message="Loop de simulação iniciado em background."
+    )
+
+    return task_response
+
+
+@app.get("/api/simulation/status")
+async def simulation_status():
+    status_payload = {
+        "status": "ready",
+        "agents_target": TOTAL_AGENTS,
+        "auto_start_simulation": AUTO_START_SIMULATION
+    }
+
+    return {
+        "success": True,
+        **status_payload,
+        "data": status_payload,
+        "result": status_payload
+    }
+
+
+# ==========================================
+# 10. FALLBACKS TEMPORÁRIOS
+# ==========================================
+
+@app.api_route("/api/graph/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def graph_fallback(full_path: str, request: Request):
+    """
+    Fallback temporário para rotas /api/graph ainda não mapeadas.
+    Para POST, devolve task_id para evitar erro de contrato no frontend.
+    """
+
+    payload = await parse_request_payload(request)
+
+    print(f"[MiroFish] Fallback /api/graph acionado: /api/graph/{full_path}", flush=True)
+
+    if request.method in ["POST", "PUT", "PATCH"]:
+        return await start_graph_build_from_payload(payload)
+
+    fallback_payload = {
+        "status": "ready",
+        "path": f"/api/graph/{full_path}",
+        "payload_received": payload
+    }
+
+    return {
+        "success": True,
+        "status": "ready",
+        "message": f"Rota /api/graph/{full_path} recebida pelo backend.",
+        "path": f"/api/graph/{full_path}",
+        "data": fallback_payload,
+        "result": fallback_payload
+    }
+
+
+@app.api_route("/api/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def api_fallback(full_path: str, request: Request):
+    """
+    Fallback final para rotas /api ainda não mapeadas.
+
+    Objetivo: evitar que o frontend minificado quebre por 404 enquanto mapeamos
+    exatamente todos os endpoints esperados pelo MiroFish.
+    """
+
+    payload = await parse_request_payload(request)
+
+    print(f"[MiroFish] Fallback /api acionado: /api/{full_path}", flush=True)
+
+    if request.method in ["POST", "PUT", "PATCH"]:
+        response = create_task_response(
+            task_type="generic_api",
+            project_id=get_project_id(payload),
+            status="completed",
+            message=f"Rota /api/{full_path} recebida pelo backend."
+        )
+
+        response["path"] = f"/api/{full_path}"
+        response["payload_received"] = payload
+        response["data"]["path"] = f"/api/{full_path}"
+        response["data"]["payload_received"] = payload
+        response["result"]["path"] = f"/api/{full_path}"
+        response["result"]["payload_received"] = payload
+
+        return response
+
+    fallback_payload = {
+        "status": "ready",
+        "path": f"/api/{full_path}",
+        "payload_received": payload
+    }
+
+    return {
+        "success": True,
+        "status": "ready",
+        "message": f"Rota /api/{full_path} recebida pelo backend.",
+        "path": f"/api/{full_path}",
+        "data": fallback_payload,
+        "result": fallback_payload
+    }
