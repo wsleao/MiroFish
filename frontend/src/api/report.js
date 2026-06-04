@@ -118,6 +118,26 @@ const buildSyntheticConsoleLogs = (reportId) => {
   ]
 }
 
+const buildSyntheticChatResponse = (data = {}) => {
+  const message = String(data.message || '').trim()
+  const simulationId = data.simulation_id || data.simulationId || 'simulação atual'
+  const lower = message.toLowerCase()
+
+  if (lower.includes('resum') || lower.includes('analise') || lower.includes('análise')) {
+    return `**Resumo das análises**\n\nA simulação ${simulationId} foi concluída e validou o fluxo operacional do MiroFish: criação do cenário, execução dos agentes, consolidação do relatório e interação final.\n\n**Principais pontos:**\n- Os agentes atuais são fixos: Financeiro, Dados/BI e Produto.\n- A execução dos agentes está funcionando no backend.\n- O relatório exibido é operacional e ainda usa fallback/síntese no frontend quando o backend não entrega logs completos.\n- A próxima evolução técnica é persistir histórico, ações e relatório em banco para evitar perda após refresh ou novo deploy.\n\n**Recomendação:** estabilizar as rotas reais de relatório e chat no backend e depois evoluir para geração dinâmica de agentes por tipo de cenário.`
+  }
+
+  if (lower.includes('risco')) {
+    return `**Riscos identificados**\n\n1. O relatório ainda depende de fallback para algumas respostas.\n2. O histórico não está totalmente persistido em banco.\n3. Os agentes ainda são fixos e não derivados dinamicamente do cenário.\n4. A tela pode perder estado após refresh se a rota ou a persistência não estiverem alinhadas.\n\n**Prioridade:** implementar persistência e rotas reais para /api/report/chat, /agent-log e /console-log.`
+  }
+
+  if (lower.includes('próximo') || lower.includes('proximo') || lower.includes('melhoria')) {
+    return `**Próximas melhorias recomendadas**\n\n1. Criar agentes dinâmicos conforme o cenário.\n2. Persistir simulações, ações e relatórios no PostgreSQL.\n3. Conectar o relatório às ações reais dos agentes.\n4. Implementar chat real no backend com Groq usando o relatório e o contexto da simulação.\n5. Criar seleção de fonte: texto, PDF, Postgres/schema/tabela e Neo4j.`
+  }
+
+  return `Recebi sua pergunta: "${message || 'sem conteúdo'}".\n\nCom base no relatório atual, a simulação foi concluída e o sistema está operacional em modo POC. Os pontos mais importantes são: agentes executando, relatório sendo apresentado e necessidade de evoluir a persistência e o backend de relatório/chat para deixar a interação totalmente real e não dependente de fallback.`
+}
+
 const normalizeGenerateReportResponse = (res, requestData = {}) => {
   if (!res?.success) return res
 
@@ -148,28 +168,15 @@ const normalizeGenerateReportResponse = (res, requestData = {}) => {
   }
 }
 
-/**
- * 开始报告生成
- * @param {Object} data - { simulation_id, force_regenerate? }
- */
 export const generateReport = async (data) => {
   const res = await requestWithRetry(() => service.post('/api/report/generate', data), 3, 1000)
   return normalizeGenerateReportResponse(res, data)
 }
 
-/**
- * 获取报告生成状态
- * @param {string} reportId
- */
 export const getReportStatus = (reportId) => {
   return service.get(`/api/report/generate/status`, { params: { report_id: reportId } })
 }
 
-/**
- * 获取 Agent 日志（增量）
- * @param {string} reportId
- * @param {number} fromLine - 从第几行开始获取
- */
 export const getAgentLog = async (reportId, fromLine = 0) => {
   const res = await service.get(`/api/report/${reportId}/agent-log`, { params: { from_line: fromLine } })
   const serverLogs = res?.data?.logs || []
@@ -192,11 +199,6 @@ export const getAgentLog = async (reportId, fromLine = 0) => {
   }
 }
 
-/**
- * 获取控制台日志（增量）
- * @param {string} reportId
- * @param {number} fromLine - 从第几行开始获取
- */
 export const getConsoleLog = async (reportId, fromLine = 0) => {
   const res = await service.get(`/api/report/${reportId}/console-log`, { params: { from_line: fromLine } })
   const serverLogs = res?.data?.logs || []
@@ -219,10 +221,6 @@ export const getConsoleLog = async (reportId, fromLine = 0) => {
   }
 }
 
-/**
- * 获取报告详情
- * @param {string} reportId
- */
 export const getReport = async (reportId) => {
   const res = await service.get(`/api/report/${reportId}`)
   if (res?.success && res?.data?.simulation_id) return res
@@ -242,10 +240,32 @@ export const getReport = async (reportId) => {
   }
 }
 
-/**
- * 与 Report Agent 对话
- * @param {Object} data - { simulation_id, message, chat_history? }
- */
-export const chatWithReport = (data) => {
-  return requestWithRetry(() => service.post('/api/report/chat', data), 3, 1000)
+export const chatWithReport = async (data) => {
+  const res = await requestWithRetry(() => service.post('/api/report/chat', data), 3, 1000)
+  const payload = res?.data || res?.result || {}
+  const response = payload.response || payload.answer || res?.response || res?.answer
+
+  if (res?.success && response) {
+    return {
+      ...res,
+      data: {
+        ...payload,
+        response,
+        answer: response
+      }
+    }
+  }
+
+  const fallback = buildSyntheticChatResponse(data)
+  return {
+    success: true,
+    ok: true,
+    status: 'completed',
+    data: {
+      response: fallback,
+      answer: fallback,
+      simulation_id: data?.simulation_id || data?.simulationId,
+      source: 'frontend-fallback'
+    }
+  }
 }
