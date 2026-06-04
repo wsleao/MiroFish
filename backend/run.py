@@ -3,7 +3,7 @@ import asyncio
 import asyncpg
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 from uuid import uuid4
 
 from fastapi import FastAPI, UploadFile, Form, File, Request
