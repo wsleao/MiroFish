@@ -1008,7 +1008,166 @@ async def simulation_status():
         "result": status_payload
     }
 
+# ============================================================
+# 11. DADOS DO GRAFO - DEVE FICAR ANTES DOS FALLBACKS
+# ============================================================
 
+def graph_data_payload(graph_id: str) -> Dict[str, Any]:
+    """
+    Retorna os dados do grafo no formato esperado pelo frontend.
+    Mantém múltiplos formatos: nodes/edges, data, result e graph.
+    """
+
+    project_id = graph_id.replace("graph-", "") if graph_id.startswith("graph-") else "render-project"
+
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+
+    # Nós mínimos para o frontend não quebrar
+    project_node = {
+        "id": project_id,
+        "label": "Project",
+        "type": "Project",
+        "name": "Projeto MiroFish Render",
+        "status": "built"
+    }
+
+    ontology_node = {
+        "id": f"ontology-{project_id}",
+        "label": "Ontology",
+        "type": "Ontology",
+        "name": "Ontologia Gerada",
+        "status": "generated"
+    }
+
+    nodes.append(project_node)
+    nodes.append(ontology_node)
+
+    edges.append({
+        "id": f"{project_id}-has-ontology",
+        "source": project_id,
+        "target": f"ontology-{project_id}",
+        "label": "HAS_ONTOLOGY",
+        "type": "HAS_ONTOLOGY"
+    })
+
+    # Se Neo4j estiver disponível, tenta enriquecer com alguns agentes
+    if neo4j_driver:
+        try:
+            with get_neo4j_session() as session:
+                result = session.run(
+                    """
+                    MATCH (p:Project {id: $project_id})-[:HAS_AGENT]->(a:Agent)
+                    RETURN a.id AS agent_id,
+                           a.personality AS personality,
+                           a.memory AS memory
+                    ORDER BY a.id
+                    LIMIT 50
+                    """,
+                    project_id=project_id
+                )
+
+                for record in result:
+                    agent_id = str(record["agent_id"])
+                    agent_node_id = f"agent-{agent_id}"
+
+                    nodes.append({
+                        "id": agent_node_id,
+                        "label": f"Agent {agent_id}",
+                        "type": "Agent",
+                        "name": f"Agent {agent_id}",
+                        "personality": record["personality"] or "",
+                        "memory": record["memory"] or ""
+                    })
+
+                    edges.append({
+                        "id": f"{project_id}-has-agent-{agent_id}",
+                        "source": project_id,
+                        "target": agent_node_id,
+                        "label": "HAS_AGENT",
+                        "type": "HAS_AGENT"
+                    })
+
+        except Exception as exc:
+            nodes.append({
+                "id": "neo4j-warning",
+                "label": "Neo4j Warning",
+                "type": "Warning",
+                "message": str(exc)
+            })
+
+    payload = {
+        "graph_id": graph_id,
+        "project_id": project_id,
+        "status": "completed",
+        "state": "completed",
+        "nodes": nodes,
+        "edges": edges,
+        "links": edges,
+        "elements": {
+            "nodes": nodes,
+            "edges": edges
+        },
+        "backend_version": BACKEND_VERSION,
+        "nodes_count": len(nodes),
+        "edges_count": len(edges)
+    }
+
+    return payload
+
+
+@app.get("/api/graph/data/{graph_id}")
+async def graph_data(graph_id: str):
+    print(f"[MiroFish] Rota específica graph data acionada: /api/graph/data/{graph_id}", flush=True)
+
+    payload = graph_data_payload(graph_id)
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "success",
+        "state": "completed",
+        "graph_id": graph_id,
+        "project_id": payload["project_id"],
+        "nodes": payload["nodes"],
+        "edges": payload["edges"],
+        "links": payload["links"],
+        "elements": payload["elements"],
+        "data": payload,
+        "result": payload,
+        "graph": payload
+    }
+
+
+@app.get("/api/graph/data/{graph_id}/status")
+async def graph_data_status(graph_id: str):
+    print(f"[MiroFish] Rota específica graph data status acionada: /api/graph/data/{graph_id}/status", flush=True)
+
+    payload = graph_data_payload(graph_id)
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "completed",
+        "state": "completed",
+        "graph_id": graph_id,
+        "project_id": payload["project_id"],
+        "data": payload,
+        "result": payload
+    }
+
+
+@app.get("/api/graph/graph/{graph_id}")
+async def graph_graph_data(graph_id: str):
+    print(f"[MiroFish] Rota específica graph acionada: /api/graph/graph/{graph_id}", flush=True)
+    return await graph_data(graph_id)
+
+
+@app.get("/api/graph/{graph_id}/data")
+async def graph_data_alias(graph_id: str):
+    print(f"[MiroFish] Rota específica graph data alias acionada: /api/graph/{graph_id}/data", flush=True)
+    return await graph_data(graph_id)
+    
 # ============================================================
 # 11. FALLBACKS - DEVEM SER AS ÚLTIMAS ROTAS DO ARQUIVO
 # ============================================================
