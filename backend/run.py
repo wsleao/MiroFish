@@ -1,12 +1,19 @@
 import os
+import re
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, UploadFile, Form, File, Request
 from fastapi.middleware.cors import CORSMiddleware
+
+try:
+    import asyncpg
+except Exception:
+    asyncpg = None
 
 try:
     from openai import AsyncOpenAI
@@ -19,7 +26,7 @@ except Exception:
     GraphDatabase = None
 
 
-BACKEND_VERSION = "mirofish-render-v8-runtime-status"
+BACKEND_VERSION = "mirofish-render-v9-postgres-context"
 
 API_KEY = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")
 BASE_URL = os.getenv("OPENAI_API_BASE", "https://api.groq.com/openai/v1")
@@ -33,7 +40,8 @@ AUTO_START_SIMULATION = os.getenv("AUTO_START_SIMULATION", "false").lower() == "
 NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
-POSTGRES_URL = os.getenv("EXTERNAL_DB_URL")
+POSTGRES_URL = os.getenv("EXTERNAL_DB_URL") or os.getenv("DATABASE_URL")
+POSTGRES_SCHEMA = os.getenv("POSTGRES_SCHEMA", "scadiadalbertobackes")
 
 BUILD_TASKS: Dict[str, Dict[str, Any]] = {}
 PROJECT_CONTEXTS: Dict[str, Dict[str, Any]] = {}
@@ -63,6 +71,44 @@ def response_ok(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload.setdefault("status", "success")
     payload.setdefault("state", payload.get("status", "success"))
     return payload
+
+
+def response_error(message: str, details: Optional[Any] = None) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "ok": False,
+        "status": "error",
+        "state": "error",
+        "message": message,
+        "error": message,
+        "details": details,
+        "backend_version": BACKEND_VERSION,
+    }
+
+
+def safe_value(value: Any) -> Any:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")[:500]
+    return value
+
+
+def row_to_dict(row: Any) -> Dict[str, Any]:
+    return {key: safe_value(row[key]) for key in row.keys()}
+
+
+def validate_identifier(value: str, field_name: str = "identifier") -> str:
+    value = str(value or "").strip()
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", value):
+        raise ValueError(f"{field_name} inválido: {value}")
+    return value
+
+
+def quote_identifier(value: str) -> str:
+    return '"' + validate_identifier(value).replace('"', '""') + '"'
 
 
 async def parse_request_payload(request: Request) -> Dict[str, Any]:
@@ -102,6 +148,149 @@ def get_project_id(payload: Optional[dict] = None) -> str:
 def get_project_name(payload: Optional[dict] = None) -> str:
     payload = payload or {}
     return str(payload.get("project_name") or payload.get("projectName") or payload.get("name") or "Projeto MiroFish Render")
+
+
+async def postgres_connect():
+    if not POSTGRES_URL:
+        raise RuntimeError("EXTERNAL_DB_URL/DATABASE_URL não configurada no Render.")
+    if not asyncpg:
+        raise RuntimeError("asyncpg não está instalado no container.")
+    return await asyncpg.connect(POSTGRES_URL, timeout=15)
+
+
+async def postgres_health_payload() -> Dict[str, Any]:
+    conn = None
+    try:
+        conn = await postgres_connect()
+        row = await conn.fetchrow(
+            """
+            select
+                current_database() as database_name,
+                current_user as user_name,
+                current_schema() as current_schema,
+                inet_server_addr()::text as server_addr,
+                inet_server_port() as server_port,
+                version() as server_version,
+                now() as checked_at,
+                exists(
+                    select 1 from information_schema.schemata where schema_name = $1
+                ) as target_schema_exists
+            """,
+            POSTGRES_SCHEMA,
+        )
+        payload = row_to_dict(row)
+        payload.update({
+            "connected": True,
+            "configured": True,
+            "target_schema": POSTGRES_SCHEMA,
+            "backend_version": BACKEND_VERSION,
+        })
+        return payload
+    finally:
+        if conn:
+            await conn.close()
+
+
+async def list_postgres_tables(schema: str = POSTGRES_SCHEMA) -> List[Dict[str, Any]]:
+    schema = validate_identifier(schema, "schema")
+    conn = None
+    try:
+        conn = await postgres_connect()
+        rows = await conn.fetch(
+            """
+            select
+                t.table_schema,
+                t.table_name,
+                t.table_type,
+                coalesce(c.column_count, 0) as column_count
+            from information_schema.tables t
+            left join (
+                select table_schema, table_name, count(*) as column_count
+                from information_schema.columns
+                where table_schema = $1
+                group by table_schema, table_name
+            ) c on c.table_schema = t.table_schema and c.table_name = t.table_name
+            where t.table_schema = $1
+            order by t.table_name
+            """,
+            schema,
+        )
+        return [row_to_dict(row) for row in rows]
+    finally:
+        if conn:
+            await conn.close()
+
+
+async def get_table_columns(schema: str, table: str) -> List[Dict[str, Any]]:
+    schema = validate_identifier(schema, "schema")
+    table = validate_identifier(table, "table")
+    conn = None
+    try:
+        conn = await postgres_connect()
+        rows = await conn.fetch(
+            """
+            select
+                column_name,
+                data_type,
+                is_nullable,
+                ordinal_position
+            from information_schema.columns
+            where table_schema = $1 and table_name = $2
+            order by ordinal_position
+            """,
+            schema,
+            table,
+        )
+        return [row_to_dict(row) for row in rows]
+    finally:
+        if conn:
+            await conn.close()
+
+
+async def preview_postgres_table(schema: str, table: str, limit: int = 10) -> Dict[str, Any]:
+    schema = validate_identifier(schema, "schema")
+    table = validate_identifier(table, "table")
+    limit = max(1, min(int(limit or 10), 50))
+    columns = await get_table_columns(schema, table)
+    conn = None
+    try:
+        conn = await postgres_connect()
+        query = f"select * from {quote_identifier(schema)}.{quote_identifier(table)} limit {limit}"
+        rows = await conn.fetch(query)
+        return {
+            "schema": schema,
+            "table": table,
+            "limit": limit,
+            "columns": columns,
+            "rows": [row_to_dict(row) for row in rows],
+        }
+    finally:
+        if conn:
+            await conn.close()
+
+
+async def build_postgres_context(schema: str = POSTGRES_SCHEMA, table: Optional[str] = None, limit: int = 5) -> str:
+    schema = validate_identifier(schema, "schema")
+    lines: List[str] = []
+    health = await postgres_health_payload()
+    lines.append("[FONTE POSTGRES]")
+    lines.append(f"database={health.get('database_name')} user={health.get('user_name')} schema={schema}")
+    lines.append(f"schema_existe={health.get('target_schema_exists')}")
+
+    if table:
+        preview = await preview_postgres_table(schema, table, limit=limit)
+        lines.append(f"\n[TABELA {schema}.{table}]")
+        lines.append("colunas=" + ", ".join([f"{c['column_name']}:{c['data_type']}" for c in preview["columns"]]))
+        lines.append("amostra=")
+        for row in preview["rows"]:
+            lines.append(str(row)[:1200])
+        return "\n".join(lines)[:12000]
+
+    tables = await list_postgres_tables(schema)
+    lines.append(f"total_tabelas={len(tables)}")
+    for item in tables[:25]:
+        lines.append(f"- {item['table_name']} ({item['table_type']}) colunas={item['column_count']}")
+    return "\n".join(lines)[:12000]
 
 
 def default_personas() -> List[Dict[str, Any]]:
@@ -209,6 +398,7 @@ def build_config(simulation_id: str) -> Dict[str, Any]:
         "llm_configured": bool(API_KEY),
         "neo4j_configured": bool(neo4j_driver),
         "postgres_configured": bool(POSTGRES_URL),
+        "postgres_schema": POSTGRES_SCHEMA,
         "backend_version": BACKEND_VERSION,
         "generated_at": utc_now(),
         "created_at": utc_now(),
@@ -241,6 +431,8 @@ def ensure_simulation(simulation_id: str) -> Dict[str, Any]:
             "actions": [],
             "posts": [],
             "timeline": [],
+            "context_preview": PROJECT_CONTEXTS.get("render-project", {}).get("context_preview", ""),
+            "context_source": PROJECT_CONTEXTS.get("render-project", {}).get("source_type", "none"),
             "config": build_config(simulation_id),
             "created_at": utc_now(),
             "updated_at": utc_now(),
@@ -251,6 +443,15 @@ def ensure_simulation(simulation_id: str) -> Dict[str, Any]:
         SIMULATIONS[simulation_id] = sim
         BUILD_TASKS[simulation_id] = sim
     return sim
+
+
+def attach_project_context(sim: Dict[str, Any], project_id: str = "render-project") -> None:
+    context = PROJECT_CONTEXTS.get(project_id) or PROJECT_CONTEXTS.get("render-project") or {}
+    if context:
+        sim["context_preview"] = context.get("context_preview", "")
+        sim["context_source"] = context.get("source_type", "unknown")
+        sim["prompt"] = context.get("prompt", "")
+        sim["project_context"] = context
 
 
 def simulation_response(simulation_id: str) -> Dict[str, Any]:
@@ -274,6 +475,7 @@ def simulation_response(simulation_id: str) -> Dict[str, Any]:
         "completed_at": sim.get("completed_at"),
         "error": sim.get("error"),
         "report_ready": sim.get("report_ready", False),
+        "context_source": sim.get("context_source"),
         "data": sim,
         "result": sim,
         "simulation": sim,
@@ -283,15 +485,27 @@ def simulation_response(simulation_id: str) -> Dict[str, Any]:
 
 async def maybe_call_llm(agent_name: str, round_number: int, context: str = "") -> str:
     if not ai_client:
-        return f"{agent_name} processou a rodada {round_number} em modo fallback local."
+        return f"{agent_name} processou a rodada {round_number} em modo fallback local com contexto de {len(context)} caracteres."
     try:
+        context_text = context[:4500] if context else "Nenhum contexto foi carregado. Informe uma fonte de dados ou arquivo."
         response = await ai_client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "Você é um agente analítico do MiroFish. Responda em uma frase objetiva."},
-                {"role": "user", "content": f"Agente: {agent_name}. Rodada: {round_number}. Contexto: {context[:1000]}"},
+                {
+                    "role": "system",
+                    "content": (
+                        "Você é um agente analítico do MiroFish. "
+                        "Use obrigatoriamente o contexto fornecido. "
+                        "Se o contexto vier de PostgreSQL, analise a estrutura, tabelas, colunas e possíveis oportunidades. "
+                        "Responda em português, em uma conclusão objetiva de até 3 frases."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Agente: {agent_name}. Rodada: {round_number}. Contexto disponível:\n{context_text}",
+                },
             ],
-            max_tokens=80,
+            max_tokens=160,
         )
         return response.choices[0].message.content or f"{agent_name} concluiu análise da rodada {round_number}."
     except Exception as exc:
@@ -300,6 +514,7 @@ async def maybe_call_llm(agent_name: str, round_number: int, context: str = "") 
 
 async def run_simulation_for_id(simulation_id: str):
     sim = ensure_simulation(simulation_id)
+    attach_project_context(sim, sim.get("project_id", "render-project"))
     personas = default_personas()
     total_rounds = int(sim.get("total_rounds") or SIMULATION_ROUNDS)
 
@@ -337,6 +552,7 @@ async def run_simulation_for_id(simulation_id: str):
                     "agent_id": persona["agent_id"],
                     "agent_name": persona["name"],
                     "type": "analysis",
+                    "context_source": sim.get("context_source"),
                     "content": analysis,
                     "created_at": utc_now(),
                 }
@@ -357,11 +573,7 @@ async def run_simulation_for_id(simulation_id: str):
                 "actions_count": len(round_actions),
                 "created_at": utc_now(),
             })
-            sim["logs"].append({
-                "time": utc_now(),
-                "message": f"Rodada {round_number}/{total_rounds} concluída.",
-            })
-
+            sim["logs"].append({"time": utc_now(), "message": f"Rodada {round_number}/{total_rounds} concluída."})
             await asyncio.sleep(ROUND_DELAY_SECONDS)
 
         sim.update({
@@ -381,19 +593,14 @@ async def run_simulation_for_id(simulation_id: str):
             "status": "ready",
             "title": "Relatório MiroFish - POC Render",
             "summary": "Simulação concluída em modo compatível no Render.",
+            "context_source": sim.get("context_source"),
             "total_rounds": total_rounds,
             "total_actions": len(sim.get("actions", [])),
             "generated_at": utc_now(),
         }
         print(f"--- [MiroFish] Simulação {simulation_id} concluída ---", flush=True)
     except Exception as exc:
-        sim.update({
-            "status": "failed",
-            "state": "failed",
-            "message": f"Simulation failed: {exc}",
-            "error": str(exc),
-            "updated_at": utc_now(),
-        })
+        sim.update({"status": "failed", "state": "failed", "message": f"Simulation failed: {exc}", "error": str(exc), "updated_at": utc_now()})
         print(f"[MiroFish] Erro na simulação {simulation_id}: {exc}", flush=True)
 
 
@@ -416,24 +623,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MiroFish Render Orchestrator", version=BACKEND_VERSION, lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/")
 def root():
-    return {
-        "status": "running",
-        "service": "MiroFish Render Orchestrator",
-        "backend_version": BACKEND_VERSION,
-        "health": "/health",
-        "docs": "/docs",
-    }
+    return {"status": "running", "service": "MiroFish Render Orchestrator", "backend_version": BACKEND_VERSION, "health": "/health", "docs": "/docs"}
 
 
 @app.head("/")
@@ -453,6 +648,7 @@ def health_check():
         "llm_configured": bool(API_KEY),
         "neo4j_configured": bool(neo4j_driver),
         "postgres_configured": bool(POSTGRES_URL),
+        "postgres_schema": POSTGRES_SCHEMA,
         "model": MODEL,
         "base_url": BASE_URL,
     }
@@ -463,52 +659,90 @@ def health_head():
     return {}
 
 
+@app.get("/api/db/health")
+async def db_health():
+    try:
+        payload = await postgres_health_payload()
+        return response_ok({"status": "connected", "state": "connected", "data": payload, "result": payload})
+    except Exception as exc:
+        return response_error("Falha ao conectar no PostgreSQL.", str(exc))
+
+
+@app.get("/api/db/schema/{schema}/tables")
+async def db_schema_tables(schema: str):
+    try:
+        tables = await list_postgres_tables(schema)
+        return response_ok({"status": "completed", "schema": schema, "count": len(tables), "data": tables, "result": tables})
+    except Exception as exc:
+        return response_error("Falha ao listar tabelas do schema.", str(exc))
+
+
+@app.get("/api/db/schema/{schema}/table/{table}/preview")
+async def db_table_preview(schema: str, table: str, limit: int = 10):
+    try:
+        preview = await preview_postgres_table(schema, table, limit)
+        return response_ok({"status": "completed", "schema": schema, "table": table, "data": preview, "result": preview})
+    except Exception as exc:
+        return response_error("Falha ao consultar preview da tabela.", str(exc))
+
+
+@app.get("/api/db/context")
+async def db_context(schema: str = POSTGRES_SCHEMA, table: Optional[str] = None, limit: int = 5):
+    try:
+        context = await build_postgres_context(schema=schema, table=table, limit=limit)
+        payload = {"schema": schema, "table": table, "context_preview": context, "context_size": len(context)}
+        return response_ok({"status": "completed", "data": payload, "result": payload})
+    except Exception as exc:
+        return response_error("Falha ao montar contexto PostgreSQL.", str(exc))
+
+
 @app.post("/update-scenario")
-async def update_scenario(prompt: str = Form(...), source_type: str = Form("text"), file: Optional[UploadFile] = File(None)):
-    preview = await read_upload_preview(file)
+async def update_scenario(prompt: str = Form(...), source_type: str = Form("text"), file: Optional[UploadFile] = File(None), schema: str = Form(POSTGRES_SCHEMA), table: Optional[str] = Form(None)):
+    source = (source_type or "text").lower()
+    if source in {"postgres", "database", "db", "datalake"}:
+        preview = await build_postgres_context(schema=schema or POSTGRES_SCHEMA, table=table, limit=5)
+    else:
+        uploaded_preview = await read_upload_preview(file)
+        preview = uploaded_preview[:12000] if uploaded_preview else prompt[:12000]
+
     PROJECT_CONTEXTS["render-project"] = {
         "project_id": "render-project",
         "project_name": "Projeto MiroFish Render",
         "prompt": prompt,
-        "source_type": source_type,
-        "context_preview": preview[:2000] if preview else prompt[:2000],
+        "source_type": source,
+        "schema": schema,
+        "table": table,
+        "context_preview": preview,
         "updated_at": utc_now(),
     }
-    return response_ok({
-        "status": "success",
-        "message": f"Mentes sincronizadas usando a fonte: {source_type}",
-        "data": PROJECT_CONTEXTS["render-project"],
-        "result": PROJECT_CONTEXTS["render-project"],
-    })
+    return response_ok({"status": "success", "message": f"Contexto carregado usando fonte: {source}", "data": PROJECT_CONTEXTS["render-project"], "result": PROJECT_CONTEXTS["render-project"]})
 
 
 @app.post("/api/graph/ontology/generate")
-async def generate_ontology_compat(request: Request, file: Optional[UploadFile] = File(None), prompt: Optional[str] = Form(None)):
+async def generate_ontology_compat(request: Request, file: Optional[UploadFile] = File(None), prompt: Optional[str] = Form(None), source_type: Optional[str] = Form(None), schema: str = Form(POSTGRES_SCHEMA), table: Optional[str] = Form(None)):
     payload = await parse_request_payload(request)
-    uploaded_preview = await read_upload_preview(file)
     project_id = get_project_id(payload)
     project_name = get_project_name(payload)
     scenario = prompt or payload.get("prompt") or payload.get("scenario") or "Gerar ontologia a partir dos dados enviados."
+    source = (source_type or payload.get("source_type") or payload.get("sourceType") or "upload").lower()
+
+    if source in {"postgres", "database", "db", "datalake"}:
+        uploaded_preview = await build_postgres_context(schema=schema or POSTGRES_SCHEMA, table=table, limit=5)
+    else:
+        uploaded_preview = await read_upload_preview(file)
+
     PROJECT_CONTEXTS[project_id] = {
         "project_id": project_id,
         "project_name": project_name,
         "prompt": scenario,
-        "context_preview": uploaded_preview[:2000] if uploaded_preview else scenario[:2000],
+        "source_type": source,
+        "schema": schema,
+        "table": table,
+        "context_preview": uploaded_preview[:12000] if uploaded_preview else scenario[:2000],
         "updated_at": utc_now(),
     }
     task_id = f"ontology_generate_{uuid4().hex}"
-    task = {
-        "task_id": task_id,
-        "id": task_id,
-        "project_id": project_id,
-        "graph_id": f"graph-{project_id}",
-        "ontology_id": f"ontology-{project_id}",
-        "status": "completed",
-        "state": "completed",
-        "message": "Ontology generation completed successfully.",
-        "created_at": utc_now(),
-        "updated_at": utc_now(),
-    }
+    task = {"task_id": task_id, "id": task_id, "project_id": project_id, "graph_id": f"graph-{project_id}", "ontology_id": f"ontology-{project_id}", "status": "completed", "state": "completed", "message": "Ontology generation completed successfully.", "created_at": utc_now(), "updated_at": utc_now()}
     BUILD_TASKS[task_id] = task
     return response_ok({"status": "completed", "state": "completed", "task_id": task_id, "data": task, "result": task, "task": task})
 
@@ -518,36 +752,14 @@ async def graph_build(request: Request):
     payload = await parse_request_payload(request)
     project_id = get_project_id(payload)
     task_id = f"graph_build_{uuid4().hex}"
-    task = {
-        "task_id": task_id,
-        "id": task_id,
-        "project_id": project_id,
-        "graph_id": f"graph-{project_id}",
-        "ontology_id": f"ontology-{project_id}",
-        "status": "completed",
-        "state": "completed",
-        "message": "Graph build completed successfully.",
-        "nodes_created": 5,
-        "relationships_created": 4,
-        "created_at": utc_now(),
-        "updated_at": utc_now(),
-    }
+    task = {"task_id": task_id, "id": task_id, "project_id": project_id, "graph_id": f"graph-{project_id}", "ontology_id": f"ontology-{project_id}", "status": "completed", "state": "completed", "message": "Graph build completed successfully.", "nodes_created": 5, "relationships_created": 4, "created_at": utc_now(), "updated_at": utc_now()}
     BUILD_TASKS[task_id] = task
     return response_ok({"status": "completed", "state": "completed", "task_id": task_id, "data": task, "result": task, "task": task})
 
 
 @app.get("/api/graph/task/{task_id}")
 async def graph_task_status(task_id: str):
-    task = BUILD_TASKS.get(task_id) or {
-        "task_id": task_id,
-        "id": task_id,
-        "project_id": "render-project",
-        "graph_id": "graph-render-project",
-        "status": "completed",
-        "state": "completed",
-        "message": "Task returned by compatibility mode.",
-        "updated_at": utc_now(),
-    }
+    task = BUILD_TASKS.get(task_id) or {"task_id": task_id, "id": task_id, "project_id": "render-project", "graph_id": "graph-render-project", "status": "completed", "state": "completed", "message": "Task returned by compatibility mode.", "updated_at": utc_now()}
     BUILD_TASKS[task_id] = task
     return response_ok({"status": task["status"], "state": task["state"], "task_id": task_id, "data": task, "result": task, "task": task})
 
@@ -555,17 +767,7 @@ async def graph_task_status(task_id: str):
 @app.get("/api/graph/project/{project_id}")
 async def graph_project_detail(project_id: str):
     context = PROJECT_CONTEXTS.get(project_id, {})
-    project = {
-        "project_id": project_id,
-        "id": project_id,
-        "name": context.get("project_name", "Projeto MiroFish Render"),
-        "status": "built",
-        "state": "built",
-        "graph_id": f"graph-{project_id}",
-        "ontology_id": f"ontology-{project_id}",
-        "agents_target": len(default_personas()),
-        "backend_version": BACKEND_VERSION,
-    }
+    project = {"project_id": project_id, "id": project_id, "name": context.get("project_name", "Projeto MiroFish Render"), "status": "built", "state": "built", "graph_id": f"graph-{project_id}", "ontology_id": f"ontology-{project_id}", "agents_target": len(default_personas()), "context_source": context.get("source_type"), "backend_version": BACKEND_VERSION}
     return response_ok({"state": "built", "project_id": project_id, "graph_id": project["graph_id"], "data": project, "result": project, "project": project})
 
 
@@ -594,19 +796,18 @@ async def simulation_create(request: Request):
     simulation_id = str(payload.get("simulation_id") or payload.get("simulationId") or f"sim_{uuid4().hex}")
     sim = ensure_simulation(simulation_id)
     sim.update({"project_id": project_id, "graph_id": f"graph-{project_id}", "status": "created", "state": "created", "updated_at": utc_now()})
+    attach_project_context(sim, project_id)
     return simulation_response(simulation_id)
 
 
 @app.get("/api/simulation/{simulation_id}")
 async def simulation_get_by_id(simulation_id: str):
-    print(f"[MiroFish] Rota específica simulation get acionada: /api/simulation/{simulation_id}", flush=True)
     return simulation_response(simulation_id)
 
 
 @app.post("/api/simulation/env-status")
 async def simulation_env_status_post():
-    print("[MiroFish] Rota específica env-status acionada: /api/simulation/env-status", flush=True)
-    payload = {"status": "ready", "state": "ready", "ready": True, "llm_configured": bool(API_KEY), "neo4j_configured": bool(neo4j_driver), "postgres_configured": bool(POSTGRES_URL), "backend_version": BACKEND_VERSION}
+    payload = {"status": "ready", "state": "ready", "ready": True, "llm_configured": bool(API_KEY), "neo4j_configured": bool(neo4j_driver), "postgres_configured": bool(POSTGRES_URL), "postgres_schema": POSTGRES_SCHEMA, "backend_version": BACKEND_VERSION}
     return response_ok({"status": "ready", "state": "ready", "data": payload, "result": payload})
 
 
@@ -617,28 +818,19 @@ async def simulation_env_status_get():
 
 @app.post("/api/simulation/prepare")
 async def simulation_prepare(request: Request):
-    print("[MiroFish] Rota específica prepare acionada: /api/simulation/prepare", flush=True)
     payload_req = await parse_request_payload(request)
     simulation_id = str(payload_req.get("simulation_id") or payload_req.get("simulationId") or payload_req.get("id") or f"sim_{uuid4().hex}")
+    project_id = get_project_id(payload_req)
     task_id = f"prepare_{uuid4().hex}"
     sim = ensure_simulation(simulation_id)
-    sim.update({
-        "task_id": task_id,
-        "prepare_task_id": task_id,
-        "status": "completed",
-        "state": "completed",
-        "message": "Simulation preparation completed successfully.",
-        "config_generated": True,
-        "config": build_config(simulation_id),
-        "updated_at": utc_now(),
-    })
+    attach_project_context(sim, project_id)
+    sim.update({"task_id": task_id, "prepare_task_id": task_id, "status": "completed", "state": "completed", "message": "Simulation preparation completed successfully.", "config_generated": True, "config": build_config(simulation_id), "updated_at": utc_now()})
     BUILD_TASKS[task_id] = sim
     return response_ok({"status": "completed", "state": "completed", "simulation_id": simulation_id, "task_id": task_id, "data": sim, "result": sim, "simulation": sim, "task": sim})
 
 
 @app.post("/api/simulation/prepare/status")
 async def simulation_prepare_status_post(request: Request):
-    print("[MiroFish] Rota específica prepare/status acionada: /api/simulation/prepare/status", flush=True)
     payload_req = await parse_request_payload(request)
     simulation_id = str(payload_req.get("simulation_id") or payload_req.get("simulationId") or payload_req.get("id") or "render-project")
     sim = ensure_simulation(simulation_id)
@@ -648,7 +840,6 @@ async def simulation_prepare_status_post(request: Request):
 
 @app.get("/api/simulation/{simulation_id}/profiles/realtime")
 async def simulation_profiles_realtime(simulation_id: str, platform: Optional[str] = None):
-    print(f"[MiroFish] Rota específica profiles/realtime acionada: /api/simulation/{simulation_id}/profiles/realtime", flush=True)
     personas = default_personas()
     payload = {"simulation_id": simulation_id, "platform": platform or "internal", "status": "completed", "state": "completed", "count": len(personas), "profiles": personas, "personas": personas, "agent_personas": personas, "agents": personas, "total_expected": len(personas), "enable_reddit": False, "enable_twitter": False, "backend_version": BACKEND_VERSION}
     return response_ok({"status": "completed", "state": "completed", "simulation_id": simulation_id, "count": len(personas), "profiles": personas, "personas": personas, "agent_personas": personas, "agents": personas, "data": payload, "result": payload})
@@ -656,12 +847,12 @@ async def simulation_profiles_realtime(simulation_id: str, platform: Optional[st
 
 @app.get("/api/simulation/{simulation_id}/config/realtime")
 async def get_simulation_config_realtime(simulation_id: str):
-    print(f"[MiroFish] Rota específica config/realtime acionada: /api/simulation/{simulation_id}/config/realtime", flush=True)
     sim = ensure_simulation(simulation_id)
+    attach_project_context(sim, sim.get("project_id", "render-project"))
     config = sim.get("config") or build_config(simulation_id)
     sim["config"] = config
     sim["config_generated"] = True
-    data = {"simulation_id": simulation_id, "status": "completed", "state": "completed", "generation_stage": "completed", "is_generating": False, "config_generated": True, "config_ready": True, "ready": True, "done": True, "summary": {"total_agents": len(config.get("agent_configs", [])), "simulation_hours": config.get("time_config", {}).get("total_simulation_hours"), "initial_posts_count": 0, "hot_topics_count": 0, "has_twitter_config": False, "has_reddit_config": False, "generated_at": config.get("generated_at"), "llm_model": config.get("llm_model") or config.get("mode")}, "config": config}
+    data = {"simulation_id": simulation_id, "status": "completed", "state": "completed", "generation_stage": "completed", "is_generating": False, "config_generated": True, "config_ready": True, "ready": True, "done": True, "context_source": sim.get("context_source"), "summary": {"total_agents": len(config.get("agent_configs", [])), "simulation_hours": config.get("time_config", {}).get("total_simulation_hours"), "initial_posts_count": 0, "hot_topics_count": 0, "has_twitter_config": False, "has_reddit_config": False, "generated_at": config.get("generated_at"), "llm_model": config.get("llm_model") or config.get("mode")}, "config": config}
     return response_ok({"status": "completed", "state": "completed", "simulation_id": simulation_id, "config_generated": True, "config_ready": True, "config": config, "data": data, "result": data})
 
 
@@ -677,6 +868,7 @@ async def start_simulation(request: Request):
     payload = await parse_request_payload(request)
     simulation_id = str(payload.get("simulation_id") or payload.get("simulationId") or payload.get("id") or next(reversed(SIMULATIONS), f"sim_{uuid4().hex}"))
     sim = ensure_simulation(simulation_id)
+    attach_project_context(sim, sim.get("project_id", "render-project"))
     total_rounds = int(payload.get("max_rounds") or payload.get("maxRounds") or payload.get("rounds") or SIMULATION_ROUNDS)
     sim.update({"total_rounds": max(1, min(total_rounds, 60)), "current_round": 0, "progress": 0, "progress_percent": 0, "status": "running", "state": "running", "message": "Simulation started.", "started_at": utc_now(), "completed_at": None, "error": None, "report_ready": False, "updated_at": utc_now()})
     existing_task = RUN_TASKS.get(simulation_id)
@@ -689,6 +881,7 @@ async def start_simulation(request: Request):
 @app.post("/api/simulation/{simulation_id}/run")
 async def simulation_run_by_id(simulation_id: str):
     sim = ensure_simulation(simulation_id)
+    attach_project_context(sim, sim.get("project_id", "render-project"))
     sim.update({"status": "running", "state": "running", "message": "Simulation run started successfully.", "updated_at": utc_now()})
     existing_task = RUN_TASKS.get(simulation_id)
     if existing_task and not existing_task.done():
