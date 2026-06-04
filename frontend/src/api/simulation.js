@@ -49,6 +49,91 @@ const normalizeRealtimeConfig = (res, simulationId) => {
   }
 }
 
+const normalizeAction = (action = {}, index = 0) => {
+  const agentId = action.agent_id ?? index
+  const platform = action.platform || (agentId % 2 === 0 ? 'twitter' : 'reddit')
+  const content = action.action_args?.content || action.content || action.message || action.text || 'Ação executada pelo agente.'
+  const timestamp = action.timestamp || action.created_at || action.time || new Date().toISOString()
+  const actionType = action.action_type || (action.type === 'analysis' ? 'CREATE_POST' : 'CREATE_POST')
+
+  return {
+    ...action,
+    id: action.id || `${timestamp}-${platform}-${agentId}-${actionType}-${index}`,
+    timestamp,
+    platform,
+    agent_id: agentId,
+    agent_name: action.agent_name || action.author || `Agente ${agentId}`,
+    round_num: action.round_num || action.round || 0,
+    action_type: actionType,
+    action_args: {
+      ...(action.action_args || {}),
+      content
+    }
+  }
+}
+
+const extractActions = (payload = {}) => {
+  const actions = payload.all_actions || payload.actions || payload.recent_actions || payload.posts || []
+  return Array.isArray(actions) ? actions.map(normalizeAction) : []
+}
+
+const normalizeRunStatus = (res, simulationId) => {
+  if (!res?.success) return res
+
+  const payload = res.data || res.result || {}
+  const actions = extractActions(payload)
+  const status = payload.status || res.status || 'ready'
+  const currentRound = payload.current_round ?? res.current_round ?? 0
+  const totalRounds = payload.total_rounds ?? res.total_rounds ?? payload.rounds ?? res.rounds ?? '-'
+  const completed = status === 'completed' || payload.state === 'completed' || payload.report_ready === true
+
+  return {
+    ...res,
+    data: {
+      ...payload,
+      simulation_id: payload.simulation_id || res.simulation_id || simulationId,
+      status,
+      state: payload.state || status,
+      runner_status: completed ? 'completed' : status,
+      total_rounds: totalRounds,
+      current_round: currentRound,
+      twitter_current_round: payload.twitter_current_round ?? currentRound,
+      reddit_current_round: payload.reddit_current_round ?? currentRound,
+      twitter_running: !completed && status === 'running',
+      reddit_running: !completed && status === 'running',
+      twitter_completed: completed,
+      reddit_completed: completed,
+      twitter_actions_count: payload.twitter_actions_count ?? actions.filter(a => a.platform === 'twitter').length,
+      reddit_actions_count: payload.reddit_actions_count ?? actions.filter(a => a.platform === 'reddit').length,
+      all_actions: actions,
+      actions
+    }
+  }
+}
+
+const normalizeRunStatusDetail = (res, simulationId) => {
+  if (!res?.success) return res
+
+  const payload = res.data || res.result || res.detail || {}
+  const actions = extractActions(payload)
+  const status = payload.status || res.status || 'ready'
+  const completed = status === 'completed' || payload.state === 'completed' || payload.report_ready === true
+
+  return {
+    ...res,
+    data: {
+      ...payload,
+      simulation_id: payload.simulation_id || res.simulation_id || simulationId,
+      status,
+      state: payload.state || status,
+      runner_status: completed ? 'completed' : status,
+      all_actions: actions,
+      actions,
+      recent_actions: actions.slice(-20)
+    }
+  }
+}
+
 export const createSimulation = (data) => {
   const payload = { ...data, enable_twitter: false, enable_reddit: false }
   return requestWithRetry(() => service.post('/api/simulation/create', payload), 3, 1000)
@@ -81,8 +166,14 @@ export const listSimulations = (projectId) => {
 
 export const startSimulation = (data) => requestWithRetry(() => service.post('/api/simulation/start', data), 3, 1000)
 export const stopSimulation = (data) => service.post('/api/simulation/stop', data)
-export const getRunStatus = (simulationId) => service.get(`/api/simulation/${simulationId}/run-status`)
-export const getRunStatusDetail = (simulationId) => service.get(`/api/simulation/${simulationId}/run-status/detail`)
+export const getRunStatus = async (simulationId) => {
+  const res = await service.get(`/api/simulation/${simulationId}/run-status`)
+  return normalizeRunStatus(res, simulationId)
+}
+export const getRunStatusDetail = async (simulationId) => {
+  const res = await service.get(`/api/simulation/${simulationId}/run-status/detail`)
+  return normalizeRunStatusDetail(res, simulationId)
+}
 
 export const getSimulationPosts = (simulationId, platform = 'internal', limit = 50, offset = 0) => {
   return service.get(`/api/simulation/${simulationId}/posts`, { params: { platform, limit, offset } })
