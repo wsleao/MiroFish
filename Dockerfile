@@ -10,7 +10,5 @@ COPY ./backend /app/backend
 
 EXPOSE 10000
 
-# Executa mapeando a raiz do PYTHONPATH
-CMD ["sh", "-c", "PYTHONPATH=. uvicorn backend.run:app --host 0.0.0.0 --port 10000"]
-
-RUN pip install --no-cache-dir fastapi uvicorn openai neo4j asyncpg python-multipart
+# Executa o wrapper que corrige o contrato do grafo e importa o app principal
+CMD ["sh", "-c", "PYTHONPATH=. uvicorn backend.run_graphfix:app --host 0.0.0.0 --port 10000"]
