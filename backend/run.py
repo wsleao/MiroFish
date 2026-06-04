@@ -638,3 +638,31 @@ async def graph_build_status():
         "neo4j_configured": bool(neo4j_driver),
         "agents_target": TOTAL_AGENTS
     }
+@app.api_route("/api/graph/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def graph_fallback(full_path: str, request: Request):
+    """
+    Fallback temporário para evitar quebra do frontend em rotas /api/graph ainda não mapeadas.
+    Use apenas enquanto ajustamos a compatibilidade com o frontend do MiroFish.
+    """
+
+    payload = {}
+
+    if request.method in ["POST", "PUT", "PATCH"]:
+        try:
+            payload = await request.json()
+        except Exception:
+            try:
+                form = await request.form()
+                payload = dict(form)
+            except Exception:
+                payload = {}
+
+    print(f"[MiroFish] Fallback /api/graph acionado: /api/graph/{full_path}", flush=True)
+
+    return {
+        "success": True,
+        "status": "fallback",
+        "message": f"Rota /api/graph/{full_path} recebida pelo backend.",
+        "path": f"/api/graph/{full_path}",
+        "payload_received": payload
+    }
