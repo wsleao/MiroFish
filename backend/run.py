@@ -1383,11 +1383,57 @@ async def simulation_profiles_realtime(simulation_id: str, platform: Optional[st
 
 
 @app.get("/api/simulation/{simulation_id}/config/realtime")
-async def simulation_config_realtime(simulation_id: str):
-    print(
-        f"[MiroFish] Rota específica config/realtime acionada: /api/simulation/{simulation_id}/config/realtime",
-        flush=True
-    )
+async def get_simulation_config_realtime(simulation_id: str):
+    print(f"[MiroFish] Rota específica config/realtime acionada: /api/simulation/{simulation_id}/config/realtime")
+
+    sim = SIMULATIONS.get(simulation_id)
+
+    if not sim:
+        return {
+            "success": False,
+            "status": "error",
+            "error": "Simulation not found",
+            "simulation_id": simulation_id,
+        }
+
+    config = sim.get("config")
+
+    if config:
+        return {
+            "success": True,
+            "status": "completed",
+            "config_generated": True,
+            "simulation_id": simulation_id,
+            "config": config,
+        }
+
+    agents = sim.get("agents") or sim.get("personas") or []
+
+    fallback_config = {
+        "simulation_id": simulation_id,
+        "name": sim.get("name", "MiroFish Simulation"),
+        "description": sim.get("description", "Configuração gerada automaticamente em modo fallback."),
+        "total_agents": len(agents),
+        "agents": agents,
+        "rounds": int(os.getenv("SIMULATION_ROUNDS", "5")),
+        "minutes_per_round": int(os.getenv("MINUTES_PER_ROUND", "60")),
+        "enable_reddit": False,
+        "enable_twitter": False,
+        "mode": "fallback-compatible",
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+
+    sim["config"] = fallback_config
+    sim["config_generated"] = True
+    sim["status"] = "config_ready"
+
+    return {
+        "success": True,
+        "status": "completed",
+        "config_generated": True,
+        "simulation_id": simulation_id,
+        "config": fallback_config,
+    }
 
     personas = [
         {
