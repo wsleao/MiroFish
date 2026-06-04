@@ -1,7 +1,7 @@
 from pathlib import Path
 import py_compile
 
-src = Path("/mnt/data/run_fixed.py")
+src = Path("/mnt/data/run.py")
 text = src.read_text(encoding="utf-8")
 
 insert = r'''
@@ -137,7 +137,7 @@ if '@app.get("/api/graph/task/{task_id}")' not in text:
 else:
     print("Rotas já existiam; não inseri duplicado.")
 
-out = Path("/mnt/data/run_fixed_v2.py")
+out = Path("/mnt/data/run.py")
 out.write_text(text, encoding="utf-8")
 py_compile.compile(str(out), doraise=True)
 
