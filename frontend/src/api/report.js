@@ -1,11 +1,48 @@
 import service, { requestWithRetry } from './index'
 
+const normalizeReportId = (value, simulationId = null) => {
+  if (value) return value
+  if (simulationId) return `report_${simulationId}`
+  return null
+}
+
+const normalizeGenerateReportResponse = (res, requestData = {}) => {
+  if (!res?.success) return res
+
+  const payload = res.data || res.result || {}
+  const simulationId = payload.simulation_id || res.simulation_id || requestData.simulation_id || requestData.simulationId
+  const reportId = normalizeReportId(payload.report_id || payload.reportId || res.report_id || res.reportId, simulationId)
+
+  if (!reportId) return res
+
+  return {
+    ...res,
+    data: {
+      ...payload,
+      report_id: reportId,
+      reportId,
+      simulation_id: simulationId,
+      status: payload.status || res.status || 'ready',
+      state: payload.state || res.state || payload.status || res.status || 'ready'
+    },
+    result: {
+      ...(res.result || payload),
+      report_id: reportId,
+      reportId,
+      simulation_id: simulationId
+    },
+    report_id: reportId,
+    reportId
+  }
+}
+
 /**
  * 开始报告生成
  * @param {Object} data - { simulation_id, force_regenerate? }
  */
-export const generateReport = (data) => {
-  return requestWithRetry(() => service.post('/api/report/generate', data), 3, 1000)
+export const generateReport = async (data) => {
+  const res = await requestWithRetry(() => service.post('/api/report/generate', data), 3, 1000)
+  return normalizeGenerateReportResponse(res, data)
 }
 
 /**
