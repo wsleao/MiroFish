@@ -12,32 +12,37 @@ from openai import AsyncOpenAI
 from neo4j import GraphDatabase
 
 
-# ==========================================
-# 1. CONFIGURAÇÕES INTERNAS E CONEXÕES
-# ==========================================
+# ============================================================
+# MIROFISH ORCHESTRATOR - RENDER COMPATIBLE BACKEND
+# Version: v4-task-project-routes-before-fallback
+# ============================================================
+
+BACKEND_VERSION = "mirofish-render-v4-task-project-routes-before-fallback"
+
+
+# ============================================================
+# 1. CONFIGURAÇÕES
+# ============================================================
 
 API_KEY = os.getenv("LLM_API_KEY")
-
-# Para Groq, use este endpoint compatível com OpenAI.
-# Para OpenAI oficial, configure OPENAI_API_BASE=https://api.openai.com/v1
 BASE_URL = os.getenv("OPENAI_API_BASE", "https://api.groq.com/openai/v1")
-
 MODEL = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
+
 TOTAL_AGENTS = int(os.getenv("TOTAL_AGENTS", "3000"))
 
-# Recomendo deixar false no Render enquanto valida as rotas.
+# Em Render/Groq, recomendo false durante testes.
 AUTO_START_SIMULATION = os.getenv("AUTO_START_SIMULATION", "false").lower() == "true"
 
-# Banco externo / Datalake
+MICRO_BATCH_SIZE = int(os.getenv("MICRO_BATCH_SIZE", "2"))
+PAUSE_BETWEEN_BATCHES = float(os.getenv("PAUSE_BETWEEN_BATCHES", "15"))
+PAUSE_BETWEEN_CYCLES = float(os.getenv("PAUSE_BETWEEN_CYCLES", "60"))
+
 POSTGRES_URL = os.getenv("EXTERNAL_DB_URL")
 
-# Neo4j AuraDB
 NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
-# Controle simples em memória para tarefas do frontend.
-# Em produção, isso poderia ir para Redis/Postgres.
 BUILD_TASKS: Dict[str, Dict[str, Any]] = {}
 
 neo4j_driver = None
@@ -52,9 +57,9 @@ if API_KEY:
     ai_client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 
-# ==========================================
-# 2. FUNÇÕES AUXILIARES
-# ==========================================
+# ============================================================
+# 2. HELPERS
+# ============================================================
 
 def utc_now() -> str:
     return datetime.utcnow().isoformat()
@@ -69,32 +74,55 @@ def get_neo4j_session():
     return neo4j_driver.session()
 
 
+def get_project_id(payload: Optional[dict] = None) -> str:
+    payload = payload or {}
+    return str(
+        payload.get("project_id")
+        or payload.get("projectId")
+        or payload.get("project")
+        or payload.get("id")
+        or "render-project"
+    )
+
+
+def get_project_name(payload: Optional[dict] = None) -> str:
+    payload = payload or {}
+    return str(
+        payload.get("project_name")
+        or payload.get("projectName")
+        or payload.get("name")
+        or "Projeto MiroFish Render"
+    )
+
+
 async def parse_request_payload(request: Request) -> dict:
     """
-    Lê JSON ou multipart/form-data sem quebrar quando o corpo vier vazio.
+    Aceita JSON, form-data, multipart ou corpo vazio.
     """
     try:
-        return await request.json()
+        body = await request.json()
+        if isinstance(body, dict):
+            return body
+        return {"body": body}
     except Exception:
-        try:
-            form = await request.form()
-            payload = {}
+        pass
 
-            for key, value in form.multi_items():
-                if hasattr(value, "filename"):
-                    payload[key] = getattr(value, "filename", "")
-                else:
-                    payload[key] = value
+    try:
+        form = await request.form()
+        payload: Dict[str, Any] = {}
 
-            return payload
-        except Exception:
-            return {}
+        for key, value in form.multi_items():
+            if hasattr(value, "filename"):
+                payload[key] = getattr(value, "filename", "")
+            else:
+                payload[key] = value
+
+        return payload
+    except Exception:
+        return {}
 
 
 async def get_first_uploaded_file_from_request(request: Request) -> Optional[UploadFile]:
-    """
-    Captura o primeiro arquivo enviado em qualquer campo multipart.
-    """
     try:
         form = await request.form()
         for _, value in form.multi_items():
@@ -106,93 +134,181 @@ async def get_first_uploaded_file_from_request(request: Request) -> Optional[Upl
     return None
 
 
-def create_task_response(
-    task_type: str = "graph_build",
-    project_id: str = "render-project",
-    status: str = "pending",
-    message: str = "Task created successfully."
+def create_task_payload(
+    task_id: str,
+    task_type: str,
+    project_id: str,
+    status: str = "completed",
+    message: str = "Task completed successfully."
 ) -> Dict[str, Any]:
-    """
-    Resposta padronizada para o frontend do MiroFish.
-
-    Garante task_id em vários formatos:
-    - response.task_id
-    - response.data.task_id
-    - response.result.task_id
-    """
-
-    task_id = f"{task_type}_{uuid4().hex}"
-
-    task_payload = {
+    return {
         "task_id": task_id,
         "id": task_id,
         "project_id": project_id,
+        "graph_id": f"graph-{project_id}",
+        "ontology_id": f"ontology-{project_id}",
         "status": status,
+        "state": status,
         "task_type": task_type,
-        "created_at": utc_now()
+        "message": message,
+        "created_at": utc_now(),
+        "updated_at": utc_now()
     }
+
+
+def create_task_response(
+    task_type: str = "graph_build",
+    project_id: str = "render-project",
+    status: str = "completed",
+    message: str = "Task completed successfully."
+) -> Dict[str, Any]:
+    """
+    Retorna task_id em múltiplos formatos para cobrir o frontend minificado.
+    """
+    task_id = f"{task_type}_{uuid4().hex}"
+    task_payload = create_task_payload(
+        task_id=task_id,
+        task_type=task_type,
+        project_id=project_id,
+        status=status,
+        message=message
+    )
 
     BUILD_TASKS[task_id] = task_payload
 
     return {
         "success": True,
+        "ok": True,
         "status": status,
+        "state": status,
         "message": message,
 
-        # Formato direto
         "task_id": task_id,
         "id": task_id,
         "project_id": project_id,
+        "graph_id": task_payload["graph_id"],
+        "ontology_id": task_payload["ontology_id"],
 
-        # Formatos esperados por frontends diferentes
         "data": task_payload,
-        "result": task_payload
+        "result": task_payload,
+        "task": task_payload
     }
 
 
-def get_project_id(payload: dict | None = None) -> str:
-    payload = payload or {}
+def get_task_or_default(task_id: str) -> Dict[str, Any]:
+    task = BUILD_TASKS.get(task_id)
 
-    return str(
-        payload.get("project_id")
-        or payload.get("projectId")
-        or payload.get("id")
-        or payload.get("project")
-        or "render-project"
-    )
+    if not task:
+        task_type = "graph_build" if task_id.startswith("graph_build") else "generic_task"
+        task = create_task_payload(
+            task_id=task_id,
+            task_type=task_type,
+            project_id="render-project",
+            status="completed",
+            message="Task não encontrada em memória. Retornando completed para compatibilidade."
+        )
+        BUILD_TASKS[task_id] = task
+
+    task.setdefault("task_id", task_id)
+    task.setdefault("id", task_id)
+    task.setdefault("project_id", "render-project")
+    task.setdefault("graph_id", f"graph-{task.get('project_id', 'render-project')}")
+    task.setdefault("ontology_id", f"ontology-{task.get('project_id', 'render-project')}")
+    task.setdefault("status", "completed")
+    task.setdefault("state", task.get("status", "completed"))
+    task.setdefault("updated_at", utc_now())
+
+    return task
 
 
-def get_project_name(payload: dict | None = None) -> str:
-    payload = payload or {}
+def task_status_response(task_id: str) -> Dict[str, Any]:
+    task = get_task_or_default(task_id)
+    status = task.get("status", "completed")
 
-    return str(
-        payload.get("project_name")
-        or payload.get("projectName")
-        or payload.get("name")
-        or "Projeto MiroFish Render"
-    )
+    return {
+        "success": True,
+        "ok": True,
+        "status": status,
+        "state": status,
+        "message": task.get("message", "Task status returned successfully."),
+        "task_id": task_id,
+        "id": task_id,
+        "project_id": task.get("project_id", "render-project"),
+        "graph_id": task.get("graph_id", "graph-render-project"),
+        "ontology_id": task.get("ontology_id", "ontology-render-project"),
+        "data": task,
+        "result": task,
+        "task": task
+    }
 
 
-# ==========================================
+def project_payload(project_id: str) -> Dict[str, Any]:
+    payload = {
+        "project_id": project_id,
+        "id": project_id,
+        "name": "Projeto MiroFish Render",
+        "status": "built",
+        "state": "built",
+        "graph_id": f"graph-{project_id}",
+        "ontology_id": f"ontology-{project_id}",
+        "nodes": [],
+        "edges": [],
+        "agents_target": TOTAL_AGENTS,
+        "neo4j_configured": bool(neo4j_driver),
+        "backend_version": BACKEND_VERSION
+    }
+
+    if neo4j_driver:
+        try:
+            with get_neo4j_session() as session:
+                result = session.run(
+                    """
+                    MATCH (p:Project {id: $project_id})
+                    OPTIONAL MATCH (p)-[:HAS_AGENT]->(a:Agent)
+                    RETURN p.id AS project_id,
+                           p.name AS name,
+                           count(a) AS agents_count
+                    """,
+                    project_id=project_id
+                )
+                record = result.single()
+                if record:
+                    payload["name"] = record["name"] or payload["name"]
+                    payload["agents_count"] = int(record["agents_count"] or 0)
+        except Exception as exc:
+            payload["neo4j_warning"] = str(exc)
+
+    return payload
+
+
+def project_response(project_id: str) -> Dict[str, Any]:
+    payload = project_payload(project_id)
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "success",
+        "state": "built",
+        "project_id": project_id,
+        "graph_id": payload["graph_id"],
+        "ontology_id": payload["ontology_id"],
+        "data": payload,
+        "result": payload,
+        "project": payload
+    }
+
+
+# ============================================================
 # 3. SIMULAÇÃO DE AGENTES
-# ==========================================
+# ============================================================
 
 async def simulate_agent_turn(agent_id: int):
-    """
-    Processa um único agente.
-
-    Correções aplicadas:
-    - Não compartilha a mesma sessão Neo4j entre tarefas concorrentes.
-    - Usa response.choices[0].message.content.
-    - Valida se LLM_API_KEY e Neo4j existem.
-    """
-
     if not ai_client:
-        print("LLM_API_KEY não configurada. Pulando simulação de agente.", flush=True)
+        print("[MiroFish] LLM_API_KEY não configurada. Pulando simulação de agente.", flush=True)
         return
 
     if not neo4j_driver:
-        print("Neo4j não configurado. Pulando simulação de agente.", flush=True)
+        print("[MiroFish] Neo4j não configurado. Pulando simulação de agente.", flush=True)
         return
 
     try:
@@ -204,7 +320,6 @@ async def simulate_agent_turn(agent_id: int):
                 """,
                 id=agent_id
             )
-
             record = result.single()
             memory = record["mem"] if record and record["mem"] else "Início da simulação."
             personality = record["pers"] if record and record["pers"] else "Agente MiroFish."
@@ -237,27 +352,19 @@ async def simulate_agent_turn(agent_id: int):
                 mem=new_memory
             )
 
-    except Exception as e:
-        print(f"Erro no agente {agent_id}: {e}", flush=True)
+    except Exception as exc:
+        print(f"[MiroFish] Erro no agente {agent_id}: {exc}", flush=True)
 
 
 async def run_simulation_loop():
-    """
-    Loop fragmentado para reduzir risco de estourar cota de TPM/RPM.
-    """
-
     await asyncio.sleep(5)
-
-    micro_batch_size = int(os.getenv("MICRO_BATCH_SIZE", "2"))
-    pause_between_batches = float(os.getenv("PAUSE_BETWEEN_BATCHES", "15"))
-    pause_between_cycles = float(os.getenv("PAUSE_BETWEEN_CYCLES", "60"))
 
     while True:
         print("--- [MiroFish] Iniciando ciclo de simulação ---", flush=True)
 
         try:
-            for i in range(0, TOTAL_AGENTS, micro_batch_size):
-                current_batch = range(i, min(i + micro_batch_size, TOTAL_AGENTS))
+            for i in range(0, TOTAL_AGENTS, MICRO_BATCH_SIZE):
+                current_batch = range(i, min(i + MICRO_BATCH_SIZE, TOTAL_AGENTS))
                 print(
                     f"-> Processando lote: {i} até {i + len(current_batch) - 1}",
                     flush=True
@@ -266,17 +373,17 @@ async def run_simulation_loop():
                 tasks = [simulate_agent_turn(agent_id) for agent_id in current_batch]
                 await asyncio.gather(*tasks)
 
-                await asyncio.sleep(pause_between_batches)
+                await asyncio.sleep(PAUSE_BETWEEN_BATCHES)
 
             print(
-                f"--- [MiroFish] Ciclo finalizado. Próxima rodada em {pause_between_cycles}s ---",
+                f"--- [MiroFish] Ciclo finalizado. Próxima rodada em {PAUSE_BETWEEN_CYCLES}s ---",
                 flush=True
             )
-            await asyncio.sleep(pause_between_cycles)
+            await asyncio.sleep(PAUSE_BETWEEN_CYCLES)
 
         except Exception as loop_error:
             print(
-                f"Erro no loop: {loop_error}. Reiniciando em 20 segundos...",
+                f"[MiroFish] Erro no loop: {loop_error}. Reiniciando em 20 segundos...",
                 flush=True
             )
             await asyncio.sleep(20)
@@ -301,12 +408,16 @@ async def lifespan(app: FastAPI):
         neo4j_driver.close()
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    title="MiroFish Render Orchestrator",
+    version=BACKEND_VERSION,
+    lifespan=lifespan
+)
 
 
-# ==========================================
+# ============================================================
 # 4. CORS
-# ==========================================
+# ============================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -317,18 +428,11 @@ app.add_middleware(
 )
 
 
-# ==========================================
-# 5. EXTRAÇÃO DO POSTGRESQL
-# ==========================================
+# ============================================================
+# 5. POSTGRES / CONTEXTO
+# ============================================================
 
 async def buscar_dados_do_postgres() -> str:
-    """
-    Conecta no Postgres e busca uma carga de contexto.
-
-    Ajuste a query para uma tabela real do seu Datalake.
-    Hoje ela está preservando a lógica do seu exemplo original.
-    """
-
     if not POSTGRES_URL:
         return "Erro: EXTERNAL_DB_URL não configurado no Render."
 
@@ -351,8 +455,8 @@ async def buscar_dados_do_postgres() -> str:
 
         return "A tabela consultada está vazia ou sem dados estruturados."
 
-    except Exception as e:
-        return f"Falha ao ler o PostgreSQL: {e}"
+    except Exception as exc:
+        return f"Falha ao ler o PostgreSQL: {exc}"
 
     finally:
         if conn:
@@ -368,11 +472,6 @@ async def extract_context_from_file(file: Optional[UploadFile]) -> str:
 
 
 async def sync_agents_context(prompt: str, contexto_final: str) -> Dict[str, Any]:
-    """
-    Atualiza os agentes no Neo4j.
-    Se ainda não existirem agentes, cria de 0 até TOTAL_AGENTS - 1.
-    """
-
     if not neo4j_driver:
         return {
             "neo4j_updated": False,
@@ -404,12 +503,6 @@ async def process_update_scenario(
     source_type: str,
     file: Optional[UploadFile] = None
 ) -> Dict[str, Any]:
-    """
-    Função central reutilizada pelas rotas:
-    - /update-scenario
-    - /api/graph/ontology/generate
-    """
-
     contexto_adicional = ""
     normalized_source_type = (source_type or "text").lower()
 
@@ -435,8 +528,9 @@ async def process_update_scenario(
     neo4j_result = await sync_agents_context(prompt, contexto_final)
 
     return {
-        "status": "success",
         "success": True,
+        "ok": True,
+        "status": "success",
         "message": f"Mentes sincronizadas usando a fonte: {normalized_source_type}",
         "source_type": normalized_source_type,
         "preview_size": len(contexto_adicional),
@@ -445,9 +539,51 @@ async def process_update_scenario(
     }
 
 
-# ==========================================
-# 6. ROTAS ORIGINAIS
-# ==========================================
+# ============================================================
+# 6. ROTAS BÁSICAS
+# ============================================================
+
+@app.get("/")
+def root():
+    return {
+        "status": "running",
+        "service": "MiroFish Render Orchestrator",
+        "backend_version": BACKEND_VERSION,
+        "health": "/health",
+        "docs": "/docs"
+    }
+
+
+@app.head("/")
+def root_head():
+    return {}
+
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "running",
+        "backend_version": BACKEND_VERSION,
+        "agents_target": TOTAL_AGENTS,
+        "auto_start_simulation": AUTO_START_SIMULATION,
+        "llm_configured": bool(API_KEY),
+        "neo4j_configured": bool(neo4j_driver),
+        "postgres_configured": bool(POSTGRES_URL),
+        "model": MODEL,
+        "base_url": BASE_URL,
+        "routes_hint": [
+            "/",
+            "/health",
+            "/update-scenario",
+            "/api/graph/ontology/generate",
+            "/api/graph/build",
+            "/api/graph/task/{task_id}",
+            "/api/graph/project/{project_id}",
+            "/api/graph/build/status/{task_id}",
+            "/api/simulation/history"
+        ]
+    }
+
 
 @app.post("/update-scenario")
 async def update_scenario(
@@ -462,141 +598,79 @@ async def update_scenario(
     )
 
 
-@app.get("/health")
-def health_check():
-    return {
-        "status": "running",
-        "agents_target": TOTAL_AGENTS,
-        "auto_start_simulation": AUTO_START_SIMULATION,
-        "llm_configured": bool(API_KEY),
-        "neo4j_configured": bool(neo4j_driver),
-        "postgres_configured": bool(POSTGRES_URL),
-        "model": MODEL,
-        "base_url": BASE_URL,
-        "routes_hint": [
-            "/update-scenario",
-            "/api/graph/ontology/generate",
-            "/api/graph/build",
-            "/api/graph/build/status/{task_id}",
-            "/api/simulation/history"
-        ]
-    }
+# ============================================================
+# 7. ROTAS DE TASK/PROJECT - DEVEM FICAR ANTES DO FALLBACK
+# ============================================================
+
+@app.get("/api/graph/task/{task_id}")
+async def graph_task_status(task_id: str):
+    print(f"[MiroFish] Rota específica task acionada: /api/graph/task/{task_id}", flush=True)
+    return task_status_response(task_id)
 
 
-# ==========================================
-# 7. ROTAS COMPATÍVEIS COM ONTOLOGIA
-# ==========================================
-
-@app.post("/api/graph/ontology/generate")
-async def generate_ontology_compat(request: Request):
-    """
-    Corrige o 404 da rota esperada pelo frontend:
-    POST /api/graph/ontology/generate
-    """
-
-    payload = await parse_request_payload(request)
-    uploaded_file = await get_first_uploaded_file_from_request(request)
-
-    prompt = str(
-        payload.get("prompt")
-        or payload.get("scenario")
-        or payload.get("description")
-        or payload.get("project_description")
-        or payload.get("content")
-        or "Gerar ontologia a partir dos dados enviados."
-    )
-
-    source_type = str(
-        payload.get("source_type")
-        or payload.get("sourceType")
-        or payload.get("type")
-        or ("upload" if uploaded_file else "text")
-    )
-
-    result = await process_update_scenario(
-        prompt=prompt,
-        source_type=source_type,
-        file=uploaded_file
-    )
-
-    project_id = get_project_id(payload)
-
-    task_response = create_task_response(
-        task_type="ontology_generate",
-        project_id=project_id,
-        status="completed",
-        message="Ontology generation completed successfully."
-    )
-
-    task_id = task_response["task_id"]
-
-    ontology_payload = {
-        "task_id": task_id,
-        "id": task_id,
-        "project_id": project_id,
-        "ontology_id": f"ontology-{project_id}",
-        "status": "completed",
-        "result": result
-    }
-
-    BUILD_TASKS[task_id].update(ontology_payload)
-
-    return {
-        "success": True,
-        "status": "success",
-        "message": "Ontology generation routed successfully.",
-
-        # Formato direto
-        "task_id": task_id,
-        "id": task_id,
-        "project_id": project_id,
-        "ontology_id": f"ontology-{project_id}",
-
-        # Formatos usados por frontends Axios
-        "data": ontology_payload,
-        "result": ontology_payload
-    }
+@app.get("/api/graph/tasks/{task_id}")
+async def graph_tasks_status(task_id: str):
+    print(f"[MiroFish] Rota específica tasks acionada: /api/graph/tasks/{task_id}", flush=True)
+    return task_status_response(task_id)
 
 
-@app.get("/api/graph/ontology/status/{task_id}")
-async def ontology_status_by_id(task_id: str):
-    return await graph_build_status_by_id(task_id)
+@app.get("/api/graph/task/{task_id}/status")
+async def graph_task_status_suffix(task_id: str):
+    print(f"[MiroFish] Rota específica task/status acionada: /api/graph/task/{task_id}/status", flush=True)
+    return task_status_response(task_id)
 
 
-# ==========================================
+@app.get("/api/graph/tasks/{task_id}/status")
+async def graph_tasks_status_suffix(task_id: str):
+    print(f"[MiroFish] Rota específica tasks/status acionada: /api/graph/tasks/{task_id}/status", flush=True)
+    return task_status_response(task_id)
+
+
+@app.get("/api/graph/project/{project_id}")
+async def graph_project_detail(project_id: str):
+    print(f"[MiroFish] Rota específica project acionada: /api/graph/project/{project_id}", flush=True)
+    return project_response(project_id)
+
+
+@app.get("/api/graph/projects/{project_id}")
+async def graph_projects_detail(project_id: str):
+    print(f"[MiroFish] Rota específica projects acionada: /api/graph/projects/{project_id}", flush=True)
+    return project_response(project_id)
+
+
+# ============================================================
 # 8. BUILD DO GRAFO
-# ==========================================
+# ============================================================
 
-async def execute_graph_build_task(task_id: str, payload: dict | None = None):
-    """
-    Executa o build do grafo em background.
-    O frontend recebe task_id imediatamente e depois consulta status.
-    """
-
+async def execute_graph_build_task(task_id: str, payload: Optional[dict] = None):
     payload = payload or {}
 
     project_id = get_project_id(payload)
     project_name = get_project_name(payload)
 
-    BUILD_TASKS.setdefault(task_id, {})
-    BUILD_TASKS[task_id].update({
+    task = get_task_or_default(task_id)
+    task.update({
         "task_id": task_id,
         "id": task_id,
         "project_id": project_id,
+        "graph_id": f"graph-{project_id}",
+        "ontology_id": f"ontology-{project_id}",
         "status": "running",
-        "started_at": utc_now()
+        "state": "running",
+        "started_at": utc_now(),
+        "updated_at": utc_now()
     })
 
     try:
         if not neo4j_driver:
-            BUILD_TASKS[task_id].update({
+            task.update({
                 "status": "completed",
+                "state": "completed",
                 "message": "Neo4j não configurado. Build simulado concluído.",
-                "graph_id": f"graph-{project_id}",
-                "ontology_id": f"ontology-{project_id}",
                 "nodes_created": 0,
                 "relationships_created": 0,
-                "completed_at": utc_now()
+                "completed_at": utc_now(),
+                "updated_at": utc_now()
             })
             return
 
@@ -632,26 +706,28 @@ async def execute_graph_build_task(task_id: str, payload: dict | None = None):
             record = result.single()
             agents_created = record["agents"] if record else TOTAL_AGENTS
 
-        BUILD_TASKS[task_id].update({
+        task.update({
             "status": "completed",
+            "state": "completed",
             "message": "Graph build completed successfully.",
-            "graph_id": f"graph-{project_id}",
-            "ontology_id": f"ontology-{project_id}",
             "nodes_created": int(agents_created) + 2,
             "relationships_created": int(agents_created) + 1,
-            "completed_at": utc_now()
+            "completed_at": utc_now(),
+            "updated_at": utc_now()
         })
 
-    except Exception as e:
-        BUILD_TASKS[task_id].update({
+    except Exception as exc:
+        task.update({
             "status": "failed",
-            "message": str(e),
-            "error": str(e),
-            "completed_at": utc_now()
+            "state": "failed",
+            "message": str(exc),
+            "error": str(exc),
+            "completed_at": utc_now(),
+            "updated_at": utc_now()
         })
 
 
-async def start_graph_build_from_payload(payload: dict | None = None) -> Dict[str, Any]:
+async def start_graph_build_from_payload(payload: Optional[dict] = None) -> Dict[str, Any]:
     payload = payload or {}
     project_id = get_project_id(payload)
 
@@ -716,51 +792,37 @@ async def graph_start_build_graph_alias(request: Request):
 
 @app.get("/api/graph/build/status/{task_id}")
 async def graph_build_status_by_id(task_id: str):
-    task = BUILD_TASKS.get(task_id)
-
-    if not task:
-        task = {
-            "task_id": task_id,
-            "id": task_id,
-            "status": "completed",
-            "message": "Task não encontrada em memória. Retornando completed para compatibilidade."
-        }
-
-    return {
-        "success": True,
-        "status": task.get("status", "completed"),
-        "task_id": task_id,
-        "id": task_id,
-        "data": task,
-        "result": task
-    }
+    return task_status_response(task_id)
 
 
 @app.get("/api/graph/status/{task_id}")
 async def graph_status_by_id(task_id: str):
-    return await graph_build_status_by_id(task_id)
+    return task_status_response(task_id)
 
 
 @app.get("/api/task/{task_id}")
 async def generic_task_status(task_id: str):
-    return await graph_build_status_by_id(task_id)
+    return task_status_response(task_id)
 
 
 @app.get("/api/tasks/{task_id}")
 async def generic_tasks_status(task_id: str):
-    return await graph_build_status_by_id(task_id)
+    return task_status_response(task_id)
 
 
 @app.get("/api/graph/status")
 async def graph_status():
     status_payload = {
         "status": "ready",
+        "state": "ready",
         "neo4j_configured": bool(neo4j_driver),
-        "agents_target": TOTAL_AGENTS
+        "agents_target": TOTAL_AGENTS,
+        "backend_version": BACKEND_VERSION
     }
 
     return {
         "success": True,
+        "ok": True,
         "status": "ready",
         "message": "Graph service is available.",
         **status_payload,
@@ -773,12 +835,15 @@ async def graph_status():
 async def graph_build_status():
     status_payload = {
         "status": "completed",
+        "state": "completed",
         "neo4j_configured": bool(neo4j_driver),
-        "agents_target": TOTAL_AGENTS
+        "agents_target": TOTAL_AGENTS,
+        "backend_version": BACKEND_VERSION
     }
 
     return {
         "success": True,
+        "ok": True,
         "status": "completed",
         "message": "Graph build status available.",
         **status_payload,
@@ -787,14 +852,93 @@ async def graph_build_status():
     }
 
 
-# ==========================================
-# 9. HISTÓRICO / PROJETOS / SIMULAÇÃO
-# ==========================================
+# ============================================================
+# 9. ONTOLOGIA
+# ============================================================
+
+@app.post("/api/graph/ontology/generate")
+async def generate_ontology_compat(request: Request):
+    payload = await parse_request_payload(request)
+    uploaded_file = await get_first_uploaded_file_from_request(request)
+
+    prompt = str(
+        payload.get("prompt")
+        or payload.get("scenario")
+        or payload.get("description")
+        or payload.get("project_description")
+        or payload.get("content")
+        or "Gerar ontologia a partir dos dados enviados."
+    )
+
+    source_type = str(
+        payload.get("source_type")
+        or payload.get("sourceType")
+        or payload.get("type")
+        or ("upload" if uploaded_file else "text")
+    )
+
+    result = await process_update_scenario(
+        prompt=prompt,
+        source_type=source_type,
+        file=uploaded_file
+    )
+
+    project_id = get_project_id(payload)
+
+    response = create_task_response(
+        task_type="ontology_generate",
+        project_id=project_id,
+        status="completed",
+        message="Ontology generation completed successfully."
+    )
+
+    task_id = response["task_id"]
+
+    ontology_payload = {
+        "task_id": task_id,
+        "id": task_id,
+        "project_id": project_id,
+        "graph_id": f"graph-{project_id}",
+        "ontology_id": f"ontology-{project_id}",
+        "status": "completed",
+        "state": "completed",
+        "result": result,
+        "updated_at": utc_now()
+    }
+
+    BUILD_TASKS[task_id].update(ontology_payload)
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "success",
+        "state": "completed",
+        "message": "Ontology generation routed successfully.",
+        "task_id": task_id,
+        "id": task_id,
+        "project_id": project_id,
+        "graph_id": f"graph-{project_id}",
+        "ontology_id": f"ontology-{project_id}",
+        "data": ontology_payload,
+        "result": ontology_payload,
+        "task": ontology_payload
+    }
+
+
+@app.get("/api/graph/ontology/status/{task_id}")
+async def ontology_status_by_id(task_id: str):
+    return task_status_response(task_id)
+
+
+# ============================================================
+# 10. HISTÓRICO / PROJETOS / SIMULAÇÃO
+# ============================================================
 
 @app.get("/api/simulation/history")
 async def simulation_history(limit: int = 20):
     return {
         "success": True,
+        "ok": True,
         "count": 0,
         "data": [],
         "result": []
@@ -805,6 +949,7 @@ async def simulation_history(limit: int = 20):
 async def projects_history(limit: int = 20):
     return {
         "success": True,
+        "ok": True,
         "count": 0,
         "data": [],
         "result": []
@@ -815,6 +960,7 @@ async def projects_history(limit: int = 20):
 async def graph_projects_history(limit: int = 20):
     return {
         "success": True,
+        "ok": True,
         "count": 0,
         "data": [],
         "result": []
@@ -825,6 +971,7 @@ async def graph_projects_history(limit: int = 20):
 async def projects_list(limit: int = 20):
     return {
         "success": True,
+        "ok": True,
         "count": 0,
         "data": [],
         "result": []
@@ -833,52 +980,41 @@ async def projects_list(limit: int = 20):
 
 @app.post("/api/simulation/start")
 async def start_simulation():
-    """
-    Inicia uma rodada em background manualmente.
-
-    Atenção: este endpoint cria um loop contínuo.
-    Use com cuidado em plano gratuito do Render/Groq.
-    """
-
     asyncio.create_task(run_simulation_loop())
 
-    task_response = create_task_response(
+    return create_task_response(
         task_type="simulation_loop",
         project_id="render-project",
         status="running",
         message="Loop de simulação iniciado em background."
     )
 
-    return task_response
-
 
 @app.get("/api/simulation/status")
 async def simulation_status():
     status_payload = {
         "status": "ready",
+        "state": "ready",
         "agents_target": TOTAL_AGENTS,
-        "auto_start_simulation": AUTO_START_SIMULATION
+        "auto_start_simulation": AUTO_START_SIMULATION,
+        "backend_version": BACKEND_VERSION
     }
 
     return {
         "success": True,
+        "ok": True,
         **status_payload,
         "data": status_payload,
         "result": status_payload
     }
 
 
-# ==========================================
-# 10. FALLBACKS TEMPORÁRIOS
-# ==========================================
+# ============================================================
+# 11. FALLBACKS - DEVEM SER AS ÚLTIMAS ROTAS DO ARQUIVO
+# ============================================================
 
 @app.api_route("/api/graph/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def graph_fallback(full_path: str, request: Request):
-    """
-    Fallback temporário para rotas /api/graph ainda não mapeadas.
-    Para POST, devolve task_id para evitar erro de contrato no frontend.
-    """
-
     payload = await parse_request_payload(request)
 
     print(f"[MiroFish] Fallback /api/graph acionado: /api/graph/{full_path}", flush=True)
@@ -888,13 +1024,17 @@ async def graph_fallback(full_path: str, request: Request):
 
     fallback_payload = {
         "status": "ready",
+        "state": "ready",
         "path": f"/api/graph/{full_path}",
-        "payload_received": payload
+        "payload_received": payload,
+        "backend_version": BACKEND_VERSION
     }
 
     return {
         "success": True,
+        "ok": True,
         "status": "ready",
+        "state": "ready",
         "message": f"Rota /api/graph/{full_path} recebida pelo backend.",
         "path": f"/api/graph/{full_path}",
         "data": fallback_payload,
@@ -904,13 +1044,6 @@ async def graph_fallback(full_path: str, request: Request):
 
 @app.api_route("/api/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def api_fallback(full_path: str, request: Request):
-    """
-    Fallback final para rotas /api ainda não mapeadas.
-
-    Objetivo: evitar que o frontend minificado quebre por 404 enquanto mapeamos
-    exatamente todos os endpoints esperados pelo MiroFish.
-    """
-
     payload = await parse_request_payload(request)
 
     print(f"[MiroFish] Fallback /api acionado: /api/{full_path}", flush=True)
@@ -934,13 +1067,17 @@ async def api_fallback(full_path: str, request: Request):
 
     fallback_payload = {
         "status": "ready",
+        "state": "ready",
         "path": f"/api/{full_path}",
-        "payload_received": payload
+        "payload_received": payload,
+        "backend_version": BACKEND_VERSION
     }
 
     return {
         "success": True,
+        "ok": True,
         "status": "ready",
+        "state": "ready",
         "message": f"Rota /api/{full_path} recebida pelo backend.",
         "path": f"/api/{full_path}",
         "data": fallback_payload,
