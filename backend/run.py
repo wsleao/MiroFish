@@ -1009,6 +1009,177 @@ async def simulation_status():
     }
 
 # ============================================================
+# 11. SIMULATION CREATE / RUN - DEVE FICAR ANTES DOS FALLBACKS
+# ============================================================
+
+@app.head("/health")
+def health_head():
+    return {}
+
+
+def create_simulation_response(
+    project_id: str = "render-project",
+    status: str = "created",
+    message: str = "Simulation created successfully."
+) -> Dict[str, Any]:
+    simulation_id = f"sim_{uuid4().hex}"
+    task_id = f"simulation_{uuid4().hex}"
+
+    payload = {
+        "simulation_id": simulation_id,
+        "id": simulation_id,
+        "task_id": task_id,
+        "project_id": project_id,
+        "graph_id": f"graph-{project_id}",
+        "status": status,
+        "state": status,
+        "message": message,
+        "agents_target": TOTAL_AGENTS,
+        "current_round": 0,
+        "created_at": utc_now(),
+        "updated_at": utc_now()
+    }
+
+    BUILD_TASKS[simulation_id] = payload
+    BUILD_TASKS[task_id] = payload
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": status,
+        "state": status,
+        "message": message,
+        "simulation_id": simulation_id,
+        "id": simulation_id,
+        "task_id": task_id,
+        "project_id": project_id,
+        "graph_id": f"graph-{project_id}",
+        "data": payload,
+        "result": payload,
+        "simulation": payload,
+        "task": payload
+    }
+
+
+def simulation_status_response(simulation_id: str) -> Dict[str, Any]:
+    simulation = BUILD_TASKS.get(simulation_id)
+
+    if not simulation:
+        simulation = {
+            "simulation_id": simulation_id,
+            "id": simulation_id,
+            "task_id": simulation_id,
+            "project_id": "render-project",
+            "graph_id": "graph-render-project",
+            "status": "completed",
+            "state": "completed",
+            "message": "Simulation não encontrada em memória. Retornando completed para compatibilidade.",
+            "agents_target": TOTAL_AGENTS,
+            "current_round": 0,
+            "created_at": utc_now(),
+            "updated_at": utc_now()
+        }
+        BUILD_TASKS[simulation_id] = simulation
+
+    status = simulation.get("status", "completed")
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": status,
+        "state": status,
+        "message": simulation.get("message", "Simulation status returned successfully."),
+        "simulation_id": simulation.get("simulation_id", simulation_id),
+        "id": simulation.get("id", simulation_id),
+        "task_id": simulation.get("task_id", simulation_id),
+        "project_id": simulation.get("project_id", "render-project"),
+        "graph_id": simulation.get("graph_id", "graph-render-project"),
+        "data": simulation,
+        "result": simulation,
+        "simulation": simulation,
+        "task": simulation
+    }
+
+
+@app.post("/api/simulation/create")
+async def simulation_create(request: Request):
+    print("[MiroFish] Rota específica simulation create acionada: /api/simulation/create", flush=True)
+
+    payload = await parse_request_payload(request)
+    project_id = get_project_id(payload)
+
+    return create_simulation_response(
+        project_id=project_id,
+        status="created",
+        message="Simulation created successfully."
+    )
+
+
+@app.post("/api/simulation/run")
+async def simulation_run(request: Request):
+    print("[MiroFish] Rota específica simulation run acionada: /api/simulation/run", flush=True)
+
+    payload = await parse_request_payload(request)
+    project_id = get_project_id(payload)
+
+    return create_simulation_response(
+        project_id=project_id,
+        status="running",
+        message="Simulation run started successfully."
+    )
+
+
+@app.post("/api/simulation/{simulation_id}/run")
+async def simulation_run_by_id(simulation_id: str):
+    print(f"[MiroFish] Rota específica simulation run by id acionada: /api/simulation/{simulation_id}/run", flush=True)
+
+    simulation = BUILD_TASKS.get(simulation_id) or {
+        "simulation_id": simulation_id,
+        "id": simulation_id,
+        "task_id": simulation_id,
+        "project_id": "render-project",
+        "graph_id": "graph-render-project",
+        "agents_target": TOTAL_AGENTS,
+        "current_round": 0,
+        "created_at": utc_now()
+    }
+
+    simulation.update({
+        "status": "running",
+        "state": "running",
+        "message": "Simulation run started successfully.",
+        "updated_at": utc_now()
+    })
+
+    BUILD_TASKS[simulation_id] = simulation
+
+    return simulation_status_response(simulation_id)
+
+
+@app.get("/api/simulation/{simulation_id}")
+async def simulation_get_by_id(simulation_id: str):
+    print(f"[MiroFish] Rota específica simulation get acionada: /api/simulation/{simulation_id}", flush=True)
+    return simulation_status_response(simulation_id)
+
+
+@app.get("/api/simulation/status/{simulation_id}")
+async def simulation_status_by_id(simulation_id: str):
+    print(f"[MiroFish] Rota específica simulation status acionada: /api/simulation/status/{simulation_id}", flush=True)
+    return simulation_status_response(simulation_id)
+
+
+@app.get("/api/simulation/run-status/{simulation_id}")
+async def simulation_run_status_by_id(simulation_id: str):
+    print(f"[MiroFish] Rota específica simulation run-status acionada: /api/simulation/run-status/{simulation_id}", flush=True)
+    return simulation_status_response(simulation_id)
+
+
+@app.get("/api/simulation/task/{task_id}")
+async def simulation_task_status(task_id: str):
+    print(f"[MiroFish] Rota específica simulation task acionada: /api/simulation/task/{task_id}", flush=True)
+    return simulation_status_response(task_id)
+    
+# ============================================================
 # 11. DADOS DO GRAFO - DEVE FICAR ANTES DOS FALLBACKS
 # ============================================================
 
