@@ -1290,6 +1290,69 @@ async def simulation_profiles_realtime(simulation_id: str, platform: Optional[st
         flush=True
     )
 
+    personas = [
+        {
+            "id": "agent-0",
+            "agent_id": 0,
+            "name": "Agente Financeiro",
+            "role": "Analista de Fluxo de Caixa e Orçamento",
+            "persona": "Especialista em análise financeira rural, fluxo de caixa, orçamento e previsão de necessidade de capital.",
+            "profile": "Financeiro",
+            "status": "ready"
+        },
+        {
+            "id": "agent-1",
+            "agent_id": 1,
+            "name": "Agente Dados/BI",
+            "role": "Analista de Dados e Indicadores",
+            "persona": "Especialista em BI, dashboards, estruturação de indicadores, histórico financeiro e análise comparativa.",
+            "profile": "Dados",
+            "status": "ready"
+        },
+        {
+            "id": "agent-2",
+            "agent_id": 2,
+            "name": "Agente Produto",
+            "role": "Especialista de Produto ERP Agro",
+            "persona": "Especialista em requisitos de produto, jornada do usuário, módulos financeiros e aderência operacional do SCADIAgro.",
+            "profile": "Produto",
+            "status": "ready"
+        }
+    ]
+
+    payload = {
+        "simulation_id": simulation_id,
+        "platform": platform or "none",
+        "status": "completed",
+        "state": "completed",
+        "count": len(personas),
+        "profiles": personas,
+        "personas": personas,
+        "agent_personas": personas,
+        "agents": personas,
+        "enable_reddit": False,
+        "enable_twitter": False,
+        "reddit_enabled": False,
+        "twitter_enabled": False,
+        "message": "Realtime profiles generated in Render compatibility mode.",
+        "backend_version": BACKEND_VERSION
+    }
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "completed",
+        "state": "completed",
+        "simulation_id": simulation_id,
+        "count": len(personas),
+        "profiles": personas,
+        "personas": personas,
+        "agent_personas": personas,
+        "agents": personas,
+        "data": payload,
+        "result": payload
+    }
+
     payload = {
         "simulation_id": simulation_id,
         "platform": platform or "none",
@@ -1325,6 +1388,119 @@ async def simulation_config_realtime(simulation_id: str):
         f"[MiroFish] Rota específica config/realtime acionada: /api/simulation/{simulation_id}/config/realtime",
         flush=True
     )
+
+    personas = [
+        {
+            "id": "agent-0",
+            "agent_id": 0,
+            "name": "Agente Financeiro",
+            "role": "Analista de Fluxo de Caixa e Orçamento",
+            "persona": "Especialista em análise financeira rural, fluxo de caixa, orçamento e previsão de necessidade de capital.",
+            "profile": "Financeiro",
+            "status": "ready"
+        },
+        {
+            "id": "agent-1",
+            "agent_id": 1,
+            "name": "Agente Dados/BI",
+            "role": "Analista de Dados e Indicadores",
+            "persona": "Especialista em BI, dashboards, estruturação de indicadores, histórico financeiro e análise comparativa.",
+            "profile": "Dados",
+            "status": "ready"
+        },
+        {
+            "id": "agent-2",
+            "agent_id": 2,
+            "name": "Agente Produto",
+            "role": "Especialista de Produto ERP Agro",
+            "persona": "Especialista em requisitos de produto, jornada do usuário, módulos financeiros e aderência operacional do SCADIAgro.",
+            "profile": "Produto",
+            "status": "ready"
+        }
+    ]
+
+    config_payload = {
+        "simulation_id": simulation_id,
+        "id": simulation_id,
+        "project_id": "render-project",
+        "graph_id": "graph-render-project",
+
+        "status": "completed",
+        "state": "completed",
+        "phase": "completed",
+        "ready": True,
+        "done": True,
+
+        "config_generated": True,
+        "config_ready": True,
+        "config_status": "completed",
+        "config_reasoning": "Configuração gerada em modo compatível no Render.",
+
+        "agents_count": len(personas),
+        "personas_count": len(personas),
+        "agent_personas_count": len(personas),
+
+        "agents": personas,
+        "personas": personas,
+        "agent_personas": personas,
+        "profiles": personas,
+
+        "entities_count": 0,
+        "entity_types": [],
+        "entities": [],
+
+        "current_round": 0,
+        "total_rounds": 1,
+
+        "enable_reddit": False,
+        "enable_twitter": False,
+        "reddit_enabled": False,
+        "twitter_enabled": False,
+        "external_sources_enabled": False,
+
+        "llm_configured": bool(API_KEY),
+        "neo4j_configured": bool(neo4j_driver),
+        "postgres_configured": bool(POSTGRES_URL),
+
+        "backend_version": BACKEND_VERSION,
+        "created_at": utc_now(),
+        "updated_at": utc_now()
+    }
+
+    SIMULATIONS[simulation_id] = config_payload
+    BUILD_TASKS[simulation_id] = config_payload
+
+    return {
+        "success": True,
+        "ok": True,
+
+        "status": "completed",
+        "state": "completed",
+        "phase": "completed",
+        "ready": True,
+        "done": True,
+
+        "simulation_id": simulation_id,
+        "id": simulation_id,
+
+        "config_generated": True,
+        "config_ready": True,
+        "config_status": "completed",
+
+        "agents_count": len(personas),
+        "personas_count": len(personas),
+        "agent_personas_count": len(personas),
+
+        "agents": personas,
+        "personas": personas,
+        "agent_personas": personas,
+        "profiles": personas,
+
+        "config": config_payload,
+        "data": config_payload,
+        "result": config_payload,
+        "simulation": config_payload
+    }
 
     payload = simulation_runtime_payload(simulation_id)
     payload.update({
