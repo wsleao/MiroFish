@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -15,7 +15,20 @@ from backend.run import (
 )
 
 
-def _node(uuid: str, name: str, label: str, summary: str = "", attributes: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def cors_headers() -> Dict[str, str]:
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Max-Age": "86400",
+    }
+
+
+def cors_json(payload: Dict[str, Any], status_code: int = 200) -> JSONResponse:
+    return JSONResponse(payload, status_code=status_code, headers=cors_headers())
+
+
+def _node(uuid: str, name: str, label: str, summary: str = "", attributes: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     attrs = attributes or {}
     return {
         "uuid": uuid,
@@ -30,7 +43,7 @@ def _node(uuid: str, name: str, label: str, summary: str = "", attributes: Dict[
     }
 
 
-def _edge(source_uuid: str, target_uuid: str, name: str, fact: str, fact_type: str | None = None) -> Dict[str, Any]:
+def _edge(source_uuid: str, target_uuid: str, name: str, fact: str, fact_type: Optional[str] = None) -> Dict[str, Any]:
     edge_id = f"edge-{source_uuid}-{target_uuid}-{name}".replace(" ", "-").replace("/", "-")
     return {
         "uuid": edge_id,
@@ -100,7 +113,6 @@ def build_graph_payload(graph_id: str) -> Dict[str, Any]:
             )
         )
 
-    # Relações entre agentes para que o grafo mostre fluxo de colaboração, não apenas nós soltos.
     for idx in range(len(agents) - 1):
         source = agents[idx]
         target = agents[idx + 1]
@@ -151,7 +163,10 @@ def build_graph_payload(graph_id: str) -> Dict[str, Any]:
 @app.middleware("http")
 async def graph_contract_middleware(request: Request, call_next):
     path = request.url.path
-    if request.method == "GET" and path.startswith("/api/graph/data/"):
-        graph_id = path.rsplit("/", 1)[-1]
-        return JSONResponse(build_graph_payload(graph_id))
+    if path.startswith("/api/graph/data/"):
+        if request.method == "OPTIONS":
+            return cors_json({"ok": True})
+        if request.method == "GET":
+            graph_id = path.rsplit("/", 1)[-1]
+            return cors_json(build_graph_payload(graph_id))
     return await call_next(request)
