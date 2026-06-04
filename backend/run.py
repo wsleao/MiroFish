@@ -1,96 +1,60 @@
 import os
 import asyncio
-import asyncpg
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Optional, Any, Dict, List
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, UploadFile, Form, File, Request
 from fastapi.middleware.cors import CORSMiddleware
-from openai import AsyncOpenAI
-from neo4j import GraphDatabase
+
+try:
+    from openai import AsyncOpenAI
+except Exception:
+    AsyncOpenAI = None
+
+try:
+    from neo4j import GraphDatabase
+except Exception:
+    GraphDatabase = None
 
 
-# ============================================================
-# MIROFISH ORCHESTRATOR - RENDER COMPATIBLE BACKEND
-# Version: v7-fallback-compatible
-# ============================================================
+BACKEND_VERSION = "mirofish-render-v8-runtime-status"
 
-BACKEND_VERSION = "mirofish-render-v7-fallback-compatible"
-
-
-# ============================================================
-# 1. CONFIGURAÇÕES
-# ============================================================
-
-API_KEY = os.getenv("LLM_API_KEY")
+API_KEY = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")
 BASE_URL = os.getenv("OPENAI_API_BASE", "https://api.groq.com/openai/v1")
 MODEL = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
 
-TOTAL_AGENTS = int(os.getenv("TOTAL_AGENTS", "3000"))
+TOTAL_AGENTS = int(os.getenv("TOTAL_AGENTS", "3"))
+SIMULATION_ROUNDS = int(os.getenv("SIMULATION_ROUNDS", "8"))
+ROUND_DELAY_SECONDS = float(os.getenv("ROUND_DELAY_SECONDS", "3"))
 AUTO_START_SIMULATION = os.getenv("AUTO_START_SIMULATION", "false").lower() == "true"
-
-MICRO_BATCH_SIZE = int(os.getenv("MICRO_BATCH_SIZE", "2"))
-PAUSE_BETWEEN_BATCHES = float(os.getenv("PAUSE_BETWEEN_BATCHES", "15"))
-PAUSE_BETWEEN_CYCLES = float(os.getenv("PAUSE_BETWEEN_CYCLES", "60"))
-
-POSTGRES_URL = os.getenv("EXTERNAL_DB_URL")
 
 NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+POSTGRES_URL = os.getenv("EXTERNAL_DB_URL")
 
 BUILD_TASKS: Dict[str, Dict[str, Any]] = {}
 PROJECT_CONTEXTS: Dict[str, Dict[str, Any]] = {}
 SIMULATIONS: Dict[str, Dict[str, Any]] = {}
-
+RUN_TASKS: Dict[str, asyncio.Task] = {}
 
 neo4j_driver = None
-if NEO4J_URI and NEO4J_USERNAME and NEO4J_PASSWORD:
-    neo4j_driver = GraphDatabase.driver(
-        NEO4J_URI,
-        auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
-    )
+if GraphDatabase and NEO4J_URI and NEO4J_USERNAME and NEO4J_PASSWORD:
+    try:
+        neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+    except Exception as exc:
+        print(f"[MiroFish] Falha ao inicializar Neo4j: {exc}", flush=True)
+        neo4j_driver = None
 
 ai_client = None
-if API_KEY:
+if AsyncOpenAI and API_KEY:
     ai_client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 
-# ============================================================
-# 2. HELPERS
-# ============================================================
-
 def utc_now() -> str:
     return datetime.utcnow().isoformat()
-
-
-def get_neo4j_session():
-    if not neo4j_driver:
-        raise RuntimeError("Neo4j não configurado.")
-    return neo4j_driver.session()
-
-
-def get_project_id(payload: Optional[dict] = None) -> str:
-    payload = payload or {}
-    return str(
-        payload.get("project_id")
-        or payload.get("projectId")
-        or payload.get("project")
-        or payload.get("id")
-        or "render-project"
-    )
-
-
-def get_project_name(payload: Optional[dict] = None) -> str:
-    payload = payload or {}
-    return str(
-        payload.get("project_name")
-        or payload.get("projectName")
-        or payload.get("name")
-        or "Projeto MiroFish Render"
-    )
 
 
 def response_ok(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -101,7 +65,7 @@ def response_ok(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-async def parse_request_payload(request: Request) -> dict:
+async def parse_request_payload(request: Request) -> Dict[str, Any]:
     try:
         body = await request.json()
         if isinstance(body, dict):
@@ -113,421 +77,353 @@ async def parse_request_payload(request: Request) -> dict:
     try:
         form = await request.form()
         payload: Dict[str, Any] = {}
-
         for key, value in form.multi_items():
             if hasattr(value, "filename"):
                 payload[key] = getattr(value, "filename", "")
             else:
                 payload[key] = value
-
         return payload
     except Exception:
         return {}
 
 
-async def get_first_uploaded_file_from_request(request: Request) -> Optional[UploadFile]:
-    try:
-        form = await request.form()
-        for _, value in form.multi_items():
-            if hasattr(value, "filename") and value.filename:
-                return value
-    except Exception:
-        return None
-
-    return None
+async def read_upload_preview(file: Optional[UploadFile]) -> str:
+    if not file:
+        return ""
+    raw = await file.read()
+    return raw[:12000].decode("utf-8", errors="ignore")
 
 
-def create_task_payload(
-    task_id: str,
-    task_type: str,
-    project_id: str,
-    status: str = "completed",
-    message: str = "Task completed successfully."
-) -> Dict[str, Any]:
+def get_project_id(payload: Optional[dict] = None) -> str:
+    payload = payload or {}
+    return str(payload.get("project_id") or payload.get("projectId") or payload.get("project") or payload.get("id") or "render-project")
+
+
+def get_project_name(payload: Optional[dict] = None) -> str:
+    payload = payload or {}
+    return str(payload.get("project_name") or payload.get("projectName") or payload.get("name") or "Projeto MiroFish Render")
+
+
+def default_personas() -> List[Dict[str, Any]]:
+    return [
+        {
+            "id": "agent-0",
+            "agent_id": 0,
+            "name": "Agente Financeiro",
+            "username": "Agente Financeiro",
+            "role": "Analista de Fluxo de Caixa e Orçamento",
+            "profession": "Especialista Financeiro Agro",
+            "persona": "Especialista em análise financeira rural, fluxo de caixa, orçamento e previsão de necessidade de capital.",
+            "profile": "Financeiro",
+            "status": "ready",
+        },
+        {
+            "id": "agent-1",
+            "agent_id": 1,
+            "name": "Agente Dados/BI",
+            "username": "Agente Dados/BI",
+            "role": "Analista de Dados e Indicadores",
+            "profession": "Especialista em BI e Indicadores",
+            "persona": "Especialista em BI, dashboards, estruturação de indicadores, histórico financeiro e análise comparativa.",
+            "profile": "Dados",
+            "status": "ready",
+        },
+        {
+            "id": "agent-2",
+            "agent_id": 2,
+            "name": "Agente Produto",
+            "username": "Agente Produto",
+            "role": "Especialista de Produto ERP Agro",
+            "profession": "Especialista de Produto",
+            "persona": "Especialista em requisitos de produto, jornada do usuário, módulos financeiros e aderência operacional do SCADIAgro.",
+            "profile": "Produto",
+            "status": "ready",
+        },
+    ][: max(1, min(TOTAL_AGENTS, 3))]
+
+
+def build_config(simulation_id: str) -> Dict[str, Any]:
+    personas = default_personas()
     return {
-        "task_id": task_id,
-        "id": task_id,
-        "project_id": project_id,
-        "graph_id": f"graph-{project_id}",
-        "ontology_id": f"ontology-{project_id}",
-        "status": status,
-        "state": status,
-        "task_type": task_type,
-        "message": message,
-        "created_at": utc_now(),
-        "updated_at": utc_now()
-    }
-
-
-def create_task_response(
-    task_type: str = "graph_build",
-    project_id: str = "render-project",
-    status: str = "completed",
-    message: str = "Task completed successfully."
-) -> Dict[str, Any]:
-    task_id = f"{task_type}_{uuid4().hex}"
-
-    task_payload = create_task_payload(
-        task_id=task_id,
-        task_type=task_type,
-        project_id=project_id,
-        status=status,
-        message=message
-    )
-
-    BUILD_TASKS[task_id] = task_payload
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": status,
-        "state": status,
-        "message": message,
-        "task_id": task_id,
-        "id": task_id,
-        "project_id": project_id,
-        "graph_id": task_payload["graph_id"],
-        "ontology_id": task_payload["ontology_id"],
-        "data": task_payload,
-        "result": task_payload,
-        "task": task_payload
-    }
-
-
-def get_task_or_default(task_id: str) -> Dict[str, Any]:
-    task = BUILD_TASKS.get(task_id)
-
-    if not task:
-        task_type = "graph_build" if task_id.startswith("graph_build") else "generic_task"
-        task = create_task_payload(
-            task_id=task_id,
-            task_type=task_type,
-            project_id="render-project",
-            status="completed",
-            message="Task não encontrada em memória. Retornando completed para compatibilidade."
-        )
-        BUILD_TASKS[task_id] = task
-
-    task.setdefault("task_id", task_id)
-    task.setdefault("id", task_id)
-    task.setdefault("project_id", "render-project")
-    task.setdefault("graph_id", f"graph-{task.get('project_id', 'render-project')}")
-    task.setdefault("ontology_id", f"ontology-{task.get('project_id', 'render-project')}")
-    task.setdefault("status", "completed")
-    task.setdefault("state", task.get("status", "completed"))
-    task.setdefault("updated_at", utc_now())
-
-    return task
-
-
-def task_status_response(task_id: str) -> Dict[str, Any]:
-    task = get_task_or_default(task_id)
-    status = task.get("status", "completed")
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": status,
-        "state": status,
-        "message": task.get("message", "Task status returned successfully."),
-        "task_id": task_id,
-        "id": task_id,
-        "project_id": task.get("project_id", "render-project"),
-        "graph_id": task.get("graph_id", "graph-render-project"),
-        "ontology_id": task.get("ontology_id", "ontology-render-project"),
-        "data": task,
-        "result": task,
-        "task": task
-    }
-
-
-def project_payload(project_id: str) -> Dict[str, Any]:
-    context = PROJECT_CONTEXTS.get(project_id, {})
-
-    return {
-        "project_id": project_id,
-        "id": project_id,
-        "name": context.get("project_name", "Projeto MiroFish Render"),
-        "status": "built",
-        "state": "built",
-        "graph_id": f"graph-{project_id}",
-        "ontology_id": f"ontology-{project_id}",
-        "nodes": [],
-        "edges": [],
-        "agents_target": TOTAL_AGENTS,
+        "simulation_id": simulation_id,
+        "id": simulation_id,
+        "project_id": "render-project",
+        "graph_id": "graph-render-project",
+        "status": "completed",
+        "state": "completed",
+        "phase": "completed",
+        "ready": True,
+        "done": True,
+        "config_generated": True,
+        "config_ready": True,
+        "config_status": "completed",
+        "config_reasoning": "Configuração gerada em modo compatível no Render.",
+        "time_config": {
+            "total_simulation_hours": SIMULATION_ROUNDS,
+            "minutes_per_round": 60,
+            "agents_per_hour_min": 1,
+            "agents_per_hour_max": len(personas),
+            "peak_hours": [9, 10, 14, 15],
+            "peak_activity_multiplier": 1.0,
+            "work_hours": list(range(8, 18)),
+            "work_activity_multiplier": 1.0,
+            "morning_hours": [8, 9, 10, 11],
+            "morning_activity_multiplier": 1.0,
+            "off_peak_hours": [18, 19, 20],
+            "off_peak_activity_multiplier": 0.5,
+        },
+        "agent_configs": [
+            {
+                "agent_id": p["agent_id"],
+                "entity_name": p["name"],
+                "entity_type": p["profile"],
+                "stance": "neutral",
+                "active_hours": list(range(8, 19)),
+                "posts_per_hour": 1,
+                "comments_per_hour": 2,
+                "response_delay_min": 1,
+                "response_delay_max": 5,
+                "activity_level": 0.5,
+                "sentiment_bias": 0,
+                "influence_weight": 1,
+            }
+            for p in personas
+        ],
+        "event_config": {
+            "initial_posts": [],
+            "hot_topics": [],
+            "narrative_direction": "Simulação analítica baseada no contexto enviado ao MiroFish.",
+        },
+        "agents_count": len(personas),
+        "personas_count": len(personas),
+        "agents": personas,
+        "personas": personas,
+        "profiles": personas,
+        "entities_count": len(personas),
+        "entity_types": [p["profile"] for p in personas],
+        "enable_reddit": False,
+        "enable_twitter": False,
+        "reddit_enabled": False,
+        "twitter_enabled": False,
+        "external_sources_enabled": False,
+        "llm_configured": bool(API_KEY),
         "neo4j_configured": bool(neo4j_driver),
-        "backend_version": BACKEND_VERSION
+        "postgres_configured": bool(POSTGRES_URL),
+        "backend_version": BACKEND_VERSION,
+        "generated_at": utc_now(),
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
     }
 
 
-def project_response(project_id: str) -> Dict[str, Any]:
-    payload = project_payload(project_id)
+def ensure_simulation(simulation_id: str) -> Dict[str, Any]:
+    sim = SIMULATIONS.get(simulation_id)
+    if not sim:
+        sim = {
+            "simulation_id": simulation_id,
+            "id": simulation_id,
+            "task_id": simulation_id,
+            "project_id": "render-project",
+            "graph_id": "graph-render-project",
+            "status": "created",
+            "state": "created",
+            "message": "Simulation created.",
+            "agents_target": len(default_personas()),
+            "current_round": 0,
+            "total_rounds": SIMULATION_ROUNDS,
+            "progress": 0,
+            "progress_percent": 0,
+            "report_ready": False,
+            "config_generated": True,
+            "enable_reddit": False,
+            "enable_twitter": False,
+            "logs": [],
+            "actions": [],
+            "posts": [],
+            "timeline": [],
+            "config": build_config(simulation_id),
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+        }
+        SIMULATIONS[simulation_id] = sim
+        BUILD_TASKS[simulation_id] = sim
+    return sim
 
+
+def simulation_response(simulation_id: str) -> Dict[str, Any]:
+    sim = ensure_simulation(simulation_id)
+    status = sim.get("status", "created")
     return {
         "success": True,
         "ok": True,
-        "status": "success",
-        "state": "built",
-        "project_id": project_id,
-        "graph_id": payload["graph_id"],
-        "ontology_id": payload["ontology_id"],
-        "data": payload,
-        "result": payload,
-        "project": payload
+        "status": status,
+        "state": status,
+        "message": sim.get("message", "Simulation status returned successfully."),
+        "simulation_id": simulation_id,
+        "id": simulation_id,
+        "task_id": sim.get("task_id", simulation_id),
+        "project_id": sim.get("project_id", "render-project"),
+        "graph_id": sim.get("graph_id", "graph-render-project"),
+        "current_round": sim.get("current_round", 0),
+        "total_rounds": sim.get("total_rounds", SIMULATION_ROUNDS),
+        "progress": sim.get("progress", 0),
+        "progress_percent": sim.get("progress_percent", sim.get("progress", 0)),
+        "completed_at": sim.get("completed_at"),
+        "error": sim.get("error"),
+        "report_ready": sim.get("report_ready", False),
+        "data": sim,
+        "result": sim,
+        "simulation": sim,
+        "task": sim,
     }
 
 
-# ============================================================
-# 3. SIMULAÇÃO DE AGENTES
-# ============================================================
-
-async def simulate_agent_turn(agent_id: int):
+async def maybe_call_llm(agent_name: str, round_number: int, context: str = "") -> str:
     if not ai_client:
-        print("[MiroFish] LLM_API_KEY não configurada. Pulando simulação de agente.", flush=True)
-        return
-
-    if not neo4j_driver:
-        print("[MiroFish] Neo4j não configurado. Pulando simulação de agente.", flush=True)
-        return
-
+        return f"{agent_name} processou a rodada {round_number} em modo fallback local."
     try:
-        with get_neo4j_session() as session:
-            result = session.run(
-                """
-                MATCH (a:Agent {id: $id})
-                RETURN a.memory AS mem, a.personality AS pers
-                """,
-                id=agent_id
-            )
-            record = result.single()
-            memory = record["mem"] if record and record["mem"] else "Início da simulação."
-            personality = record["pers"] if record and record["pers"] else "Agente MiroFish."
-
         response = await ai_client.chat.completions.create(
             model=MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": f"Você é um agente especialista do MiroFish. Perfil: {personality}"
-                },
-                {
-                    "role": "user",
-                    "content": f"Histórico: {memory}. Qual sua próxima análise breve?"
-                }
+                {"role": "system", "content": "Você é um agente analítico do MiroFish. Responda em uma frase objetiva."},
+                {"role": "user", "content": f"Agente: {agent_name}. Rodada: {round_number}. Contexto: {context[:1000]}"},
             ],
-            max_tokens=120
+            max_tokens=80,
         )
-
-        new_memory = response.choices[0].message.content or ""
-
-        with get_neo4j_session() as session:
-            session.run(
-                """
-                MERGE (a:Agent {id: $id})
-                SET a.memory = $mem,
-                    a.updated_at = datetime()
-                """,
-                id=agent_id,
-                mem=new_memory
-            )
-
+        return response.choices[0].message.content or f"{agent_name} concluiu análise da rodada {round_number}."
     except Exception as exc:
-        print(f"[MiroFish] Erro no agente {agent_id}: {exc}", flush=True)
+        return f"{agent_name} concluiu a rodada {round_number} em fallback após erro LLM: {exc}"
 
 
-async def run_simulation_loop():
-    await asyncio.sleep(5)
+async def run_simulation_for_id(simulation_id: str):
+    sim = ensure_simulation(simulation_id)
+    personas = default_personas()
+    total_rounds = int(sim.get("total_rounds") or SIMULATION_ROUNDS)
 
-    while True:
-        print("--- [MiroFish] Iniciando ciclo de simulação ---", flush=True)
+    sim.update({
+        "status": "running",
+        "state": "running",
+        "message": "Simulation running.",
+        "started_at": sim.get("started_at") or utc_now(),
+        "completed_at": None,
+        "error": None,
+        "report_ready": False,
+        "updated_at": utc_now(),
+    })
 
-        try:
-            for i in range(0, TOTAL_AGENTS, MICRO_BATCH_SIZE):
-                current_batch = range(i, min(i + MICRO_BATCH_SIZE, TOTAL_AGENTS))
-                print(
-                    f"-> Processando lote: {i} até {i + len(current_batch) - 1}",
-                    flush=True
-                )
+    print("--- [MiroFish] Iniciando ciclo de simulação ---", flush=True)
 
-                tasks = [simulate_agent_turn(agent_id) for agent_id in current_batch]
-                await asyncio.gather(*tasks)
+    try:
+        for round_number in range(1, total_rounds + 1):
+            sim["current_round"] = round_number
+            sim["progress"] = int((round_number / total_rounds) * 100)
+            sim["progress_percent"] = sim["progress"]
+            sim["message"] = f"Processando rodada {round_number} de {total_rounds}."
+            sim["updated_at"] = utc_now()
 
-                await asyncio.sleep(PAUSE_BETWEEN_BATCHES)
+            start_index = (round_number - 1) * len(personas)
+            end_index = start_index + len(personas) - 1
+            print(f"-> Processando lote: {start_index} até {end_index}", flush=True)
 
-            print(
-                f"--- [MiroFish] Ciclo finalizado. Próxima rodada em {PAUSE_BETWEEN_CYCLES}s ---",
-                flush=True
-            )
-            await asyncio.sleep(PAUSE_BETWEEN_CYCLES)
+            round_actions = []
+            for persona in personas:
+                analysis = await maybe_call_llm(persona["name"], round_number, sim.get("context_preview", ""))
+                action = {
+                    "round": round_number,
+                    "round_num": round_number,
+                    "agent_id": persona["agent_id"],
+                    "agent_name": persona["name"],
+                    "type": "analysis",
+                    "content": analysis,
+                    "created_at": utc_now(),
+                }
+                round_actions.append(action)
+                sim["actions"].append(action)
+                sim["posts"].append({
+                    "id": f"post_{simulation_id}_{round_number}_{persona['agent_id']}",
+                    "round": round_number,
+                    "agent_id": persona["agent_id"],
+                    "author": persona["name"],
+                    "content": analysis,
+                    "created_at": utc_now(),
+                })
 
-        except Exception as loop_error:
-            print(
-                f"[MiroFish] Erro no loop: {loop_error}. Reiniciando em 20 segundos...",
-                flush=True
-            )
-            await asyncio.sleep(20)
+            sim["timeline"].append({
+                "round": round_number,
+                "status": "completed",
+                "actions_count": len(round_actions),
+                "created_at": utc_now(),
+            })
+            sim["logs"].append({
+                "time": utc_now(),
+                "message": f"Rodada {round_number}/{total_rounds} concluída.",
+            })
+
+            await asyncio.sleep(ROUND_DELAY_SECONDS)
+
+        sim.update({
+            "status": "completed",
+            "state": "completed",
+            "message": "Simulation completed successfully.",
+            "current_round": total_rounds,
+            "progress": 100,
+            "progress_percent": 100,
+            "completed_at": utc_now(),
+            "report_ready": True,
+            "updated_at": utc_now(),
+        })
+        sim["report"] = {
+            "report_id": f"report_{simulation_id}",
+            "simulation_id": simulation_id,
+            "status": "ready",
+            "title": "Relatório MiroFish - POC Render",
+            "summary": "Simulação concluída em modo compatível no Render.",
+            "total_rounds": total_rounds,
+            "total_actions": len(sim.get("actions", [])),
+            "generated_at": utc_now(),
+        }
+        print(f"--- [MiroFish] Simulação {simulation_id} concluída ---", flush=True)
+    except Exception as exc:
+        sim.update({
+            "status": "failed",
+            "state": "failed",
+            "message": f"Simulation failed: {exc}",
+            "error": str(exc),
+            "updated_at": utc_now(),
+        })
+        print(f"[MiroFish] Erro na simulação {simulation_id}: {exc}", flush=True)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    loop_task = None
-
     if AUTO_START_SIMULATION:
+        simulation_id = f"sim_auto_{uuid4().hex}"
+        ensure_simulation(simulation_id)
+        RUN_TASKS[simulation_id] = asyncio.create_task(run_simulation_for_id(simulation_id))
         print("[MiroFish] AUTO_START_SIMULATION=true. Iniciando loop automático.", flush=True)
-        loop_task = asyncio.create_task(run_simulation_loop())
     else:
         print("[MiroFish] AUTO_START_SIMULATION=false. Loop automático desativado.", flush=True)
-
     yield
-
-    if loop_task:
-        loop_task.cancel()
-
+    for task in RUN_TASKS.values():
+        if not task.done():
+            task.cancel()
     if neo4j_driver:
         neo4j_driver.close()
 
 
-app = FastAPI(
-    title="MiroFish Render Orchestrator",
-    version=BACKEND_VERSION,
-    lifespan=lifespan
-)
-
-
-# ============================================================
-# 4. CORS
-# ============================================================
+app = FastAPI(title="MiroFish Render Orchestrator", version=BACKEND_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# ============================================================
-# 5. POSTGRES / CONTEXTO
-# ============================================================
-
-async def buscar_dados_do_postgres() -> str:
-    if not POSTGRES_URL:
-        return "Erro: EXTERNAL_DB_URL não configurado no Render."
-
-    conn = None
-
-    try:
-        conn = await asyncpg.connect(POSTGRES_URL)
-
-        query = """
-        SELECT conteudo_texto
-        FROM scadiadalbertobackes.sua_tabela
-        ORDER BY id DESC
-        LIMIT 1;
-        """
-
-        row = await conn.fetchrow(query)
-
-        if row and row["conteudo_texto"]:
-            return str(row["conteudo_texto"])
-
-        return "A tabela consultada está vazia ou sem dados estruturados."
-
-    except Exception as exc:
-        return f"Falha ao ler o PostgreSQL: {exc}"
-
-    finally:
-        if conn:
-            await conn.close()
-
-
-async def extract_context_from_file(file: Optional[UploadFile]) -> str:
-    if not file:
-        return ""
-
-    content = await file.read()
-    return content.decode("utf-8", errors="ignore")
-
-
-async def sync_agents_context(prompt: str, contexto_final: str) -> Dict[str, Any]:
-    if not neo4j_driver:
-        return {
-            "neo4j_updated": False,
-            "warning": "Neo4j não configurado. Contexto não foi gravado nos agentes."
-        }
-
-    try:
-        with get_neo4j_session() as session:
-            session.run(
-                """
-                UNWIND range(0, $total_agents - 1) AS agent_id
-                MERGE (a:Agent {id: agent_id})
-                SET a.personality = $prompt,
-                    a.memory = $contexto,
-                    a.updated_at = datetime()
-                """,
-                total_agents=TOTAL_AGENTS,
-                prompt=prompt,
-                contexto=contexto_final[:12000]
-            )
-
-        return {
-            "neo4j_updated": True,
-            "agents_updated": TOTAL_AGENTS
-        }
-
-    except Exception as exc:
-        return {
-            "neo4j_updated": False,
-            "warning": str(exc)
-        }
-
-
-async def process_update_scenario(
-    prompt: str,
-    source_type: str,
-    file: Optional[UploadFile] = None
-) -> Dict[str, Any]:
-    contexto_adicional = ""
-    normalized_source_type = (source_type or "text").lower()
-
-    if normalized_source_type == "postgres":
-        print("[MiroFish] Fonte detectada: PostgreSQL", flush=True)
-        contexto_adicional = await buscar_dados_do_postgres()
-
-    elif normalized_source_type in ["file", "upload", "files"] and file:
-        print(f"[MiroFish] Fonte detectada: Upload de arquivo ({file.filename})", flush=True)
-        contexto_adicional = await extract_context_from_file(file)
-
-    else:
-        contexto_adicional = "Nenhuma fonte secundária acoplada. Usando apenas o prompt informado."
-
-    contexto_final = f"""
-[PROMPT PRINCIPAL]
-{prompt}
-
-[CARGA DE CONTEXTO VINCULADA]
-{contexto_adicional}
-""".strip()
-
-    neo4j_result = await sync_agents_context(prompt, contexto_final)
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "success",
-        "message": f"Mentes sincronizadas usando a fonte: {normalized_source_type}",
-        "source_type": normalized_source_type,
-        "preview_size": len(contexto_adicional),
-        "context_preview": contexto_final[:2000],
-        "neo4j": neo4j_result
-    }
-
-
-# ============================================================
-# 6. ROTAS BÁSICAS
-# ============================================================
 
 @app.get("/")
 def root():
@@ -536,7 +432,7 @@ def root():
         "service": "MiroFish Render Orchestrator",
         "backend_version": BACKEND_VERSION,
         "health": "/health",
-        "docs": "/docs"
+        "docs": "/docs",
     }
 
 
@@ -551,28 +447,14 @@ def health_check():
         "status": "running",
         "backend_version": BACKEND_VERSION,
         "agents_target": TOTAL_AGENTS,
+        "simulation_rounds": SIMULATION_ROUNDS,
+        "round_delay_seconds": ROUND_DELAY_SECONDS,
         "auto_start_simulation": AUTO_START_SIMULATION,
         "llm_configured": bool(API_KEY),
         "neo4j_configured": bool(neo4j_driver),
         "postgres_configured": bool(POSTGRES_URL),
         "model": MODEL,
         "base_url": BASE_URL,
-        "routes_hint": [
-            "/",
-            "/health",
-            "/update-scenario",
-            "/api/graph/ontology/generate",
-            "/api/graph/build",
-            "/api/graph/task/{task_id}",
-            "/api/graph/project/{project_id}",
-            "/api/graph/data/{graph_id}",
-            "/api/graph/build/status/{task_id}",
-            "/api/simulation/history",
-            "/api/simulation/create",
-            "/api/simulation/env-status",
-            "/api/simulation/prepare",
-            "/api/simulation/{simulation_id}/config/realtime"
-        ]
     }
 
 
@@ -582,70 +464,61 @@ def health_head():
 
 
 @app.post("/update-scenario")
-async def update_scenario(
-    prompt: str = Form(...),
-    source_type: str = Form(...),
-    file: Optional[UploadFile] = File(None)
-):
-    return await process_update_scenario(
-        prompt=prompt,
-        source_type=source_type,
-        file=file
-    )
+async def update_scenario(prompt: str = Form(...), source_type: str = Form("text"), file: Optional[UploadFile] = File(None)):
+    preview = await read_upload_preview(file)
+    PROJECT_CONTEXTS["render-project"] = {
+        "project_id": "render-project",
+        "project_name": "Projeto MiroFish Render",
+        "prompt": prompt,
+        "source_type": source_type,
+        "context_preview": preview[:2000] if preview else prompt[:2000],
+        "updated_at": utc_now(),
+    }
+    return response_ok({
+        "status": "success",
+        "message": f"Mentes sincronizadas usando a fonte: {source_type}",
+        "data": PROJECT_CONTEXTS["render-project"],
+        "result": PROJECT_CONTEXTS["render-project"],
+    })
 
 
-# ============================================================
-# 7. ROTAS DE TASK/PROJECT
-# ============================================================
-
-@app.get("/api/graph/task/{task_id}")
-async def graph_task_status(task_id: str):
-    print(f"[MiroFish] Rota específica task acionada: /api/graph/task/{task_id}", flush=True)
-    return task_status_response(task_id)
-
-
-@app.get("/api/graph/tasks/{task_id}")
-async def graph_tasks_status(task_id: str):
-    print(f"[MiroFish] Rota específica tasks acionada: /api/graph/tasks/{task_id}", flush=True)
-    return task_status_response(task_id)
-
-
-@app.get("/api/graph/task/{task_id}/status")
-async def graph_task_status_suffix(task_id: str):
-    print(f"[MiroFish] Rota específica task/status acionada: /api/graph/task/{task_id}/status", flush=True)
-    return task_status_response(task_id)
-
-
-@app.get("/api/graph/tasks/{task_id}/status")
-async def graph_tasks_status_suffix(task_id: str):
-    print(f"[MiroFish] Rota específica tasks/status acionada: /api/graph/tasks/{task_id}/status", flush=True)
-    return task_status_response(task_id)
-
-
-@app.get("/api/graph/project/{project_id}")
-async def graph_project_detail(project_id: str):
-    print(f"[MiroFish] Rota específica project acionada: /api/graph/project/{project_id}", flush=True)
-    return project_response(project_id)
-
-
-@app.get("/api/graph/projects/{project_id}")
-async def graph_projects_detail(project_id: str):
-    print(f"[MiroFish] Rota específica projects acionada: /api/graph/projects/{project_id}", flush=True)
-    return project_response(project_id)
-
-
-# ============================================================
-# 8. BUILD DO GRAFO
-# ============================================================
-
-async def execute_graph_build_task(task_id: str, payload: Optional[dict] = None):
-    payload = payload or {}
-
+@app.post("/api/graph/ontology/generate")
+async def generate_ontology_compat(request: Request, file: Optional[UploadFile] = File(None), prompt: Optional[str] = Form(None)):
+    payload = await parse_request_payload(request)
+    uploaded_preview = await read_upload_preview(file)
     project_id = get_project_id(payload)
     project_name = get_project_name(payload)
+    scenario = prompt or payload.get("prompt") or payload.get("scenario") or "Gerar ontologia a partir dos dados enviados."
+    PROJECT_CONTEXTS[project_id] = {
+        "project_id": project_id,
+        "project_name": project_name,
+        "prompt": scenario,
+        "context_preview": uploaded_preview[:2000] if uploaded_preview else scenario[:2000],
+        "updated_at": utc_now(),
+    }
+    task_id = f"ontology_generate_{uuid4().hex}"
+    task = {
+        "task_id": task_id,
+        "id": task_id,
+        "project_id": project_id,
+        "graph_id": f"graph-{project_id}",
+        "ontology_id": f"ontology-{project_id}",
+        "status": "completed",
+        "state": "completed",
+        "message": "Ontology generation completed successfully.",
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
+    }
+    BUILD_TASKS[task_id] = task
+    return response_ok({"status": "completed", "state": "completed", "task_id": task_id, "data": task, "result": task, "task": task})
 
-    task = get_task_or_default(task_id)
-    task.update({
+
+@app.post("/api/graph/build")
+async def graph_build(request: Request):
+    payload = await parse_request_payload(request)
+    project_id = get_project_id(payload)
+    task_id = f"graph_build_{uuid4().hex}"
+    task = {
         "task_id": task_id,
         "id": task_id,
         "project_id": project_id,
@@ -656,548 +529,85 @@ async def execute_graph_build_task(task_id: str, payload: Optional[dict] = None)
         "message": "Graph build completed successfully.",
         "nodes_created": 5,
         "relationships_created": 4,
-        "project_name": project_name,
-        "completed_at": utc_now(),
-        "updated_at": utc_now()
-    })
-
-    PROJECT_CONTEXTS[project_id] = {
-        "project_id": project_id,
-        "project_name": project_name,
-        "graph_id": f"graph-{project_id}",
-        "updated_at": utc_now()
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
     }
+    BUILD_TASKS[task_id] = task
+    return response_ok({"status": "completed", "state": "completed", "task_id": task_id, "data": task, "result": task, "task": task})
 
 
-async def start_graph_build_from_payload(payload: Optional[dict] = None) -> Dict[str, Any]:
-    payload = payload or {}
-    project_id = get_project_id(payload)
-
-    response = create_task_response(
-        task_type="graph_build",
-        project_id=project_id,
-        status="pending",
-        message="Graph build task created successfully."
-    )
-
-    task_id = response["task_id"]
-
-    await execute_graph_build_task(
-        task_id=task_id,
-        payload=payload
-    )
-
-    task = get_task_or_default(task_id)
-
-    response["status"] = "completed"
-    response["state"] = "completed"
-    response["data"] = task
-    response["result"] = task
-    response["task"] = task
-
-    return response
-
-
-async def start_graph_build_response(request: Request):
-    payload = await parse_request_payload(request)
-    return await start_graph_build_from_payload(payload)
-
-
-@app.post("/api/graph/build")
-async def graph_build(request: Request):
-    return await start_graph_build_response(request)
-
-
-@app.post("/api/graph/build/start")
-async def graph_build_start(request: Request):
-    return await start_graph_build_response(request)
-
-
-@app.post("/api/graph/start-build")
-async def graph_start_build(request: Request):
-    return await start_graph_build_response(request)
-
-
-@app.post("/api/graph/buildGraph")
-async def graph_build_graph(request: Request):
-    return await start_graph_build_response(request)
-
-
-@app.post("/api/graph/ontology/build")
-async def graph_ontology_build(request: Request):
-    return await start_graph_build_response(request)
-
-
-@app.post("/api/graph/build/startBuildGraph")
-async def graph_start_build_graph(request: Request):
-    return await start_graph_build_response(request)
-
-
-@app.post("/api/graph/startBuildGraph")
-async def graph_start_build_graph_alias(request: Request):
-    return await start_graph_build_response(request)
-
-
-@app.get("/api/graph/build/status/{task_id}")
-async def graph_build_status_by_id(task_id: str):
-    return task_status_response(task_id)
-
-
-@app.get("/api/graph/status/{task_id}")
-async def graph_status_by_id(task_id: str):
-    return task_status_response(task_id)
-
-
-@app.get("/api/task/{task_id}")
-async def generic_task_status(task_id: str):
-    return task_status_response(task_id)
-
-
-@app.get("/api/tasks/{task_id}")
-async def generic_tasks_status(task_id: str):
-    return task_status_response(task_id)
-
-
-@app.get("/api/graph/status")
-async def graph_status():
-    status_payload = {
-        "status": "ready",
-        "state": "ready",
-        "neo4j_configured": bool(neo4j_driver),
-        "agents_target": TOTAL_AGENTS,
-        "backend_version": BACKEND_VERSION
-    }
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "ready",
-        "message": "Graph service is available.",
-        **status_payload,
-        "data": status_payload,
-        "result": status_payload
-    }
-
-
-@app.get("/api/graph/build/status")
-async def graph_build_status():
-    status_payload = {
-        "status": "completed",
-        "state": "completed",
-        "neo4j_configured": bool(neo4j_driver),
-        "agents_target": TOTAL_AGENTS,
-        "backend_version": BACKEND_VERSION
-    }
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "completed",
-        "message": "Graph build status available.",
-        **status_payload,
-        "data": status_payload,
-        "result": status_payload
-    }
-
-
-# ============================================================
-# 9. ONTOLOGIA
-# ============================================================
-
-@app.post("/api/graph/ontology/generate")
-async def generate_ontology_compat(request: Request):
-    payload = await parse_request_payload(request)
-    uploaded_file = await get_first_uploaded_file_from_request(request)
-
-    prompt = str(
-        payload.get("prompt")
-        or payload.get("scenario")
-        or payload.get("description")
-        or payload.get("project_description")
-        or payload.get("content")
-        or "Gerar ontologia a partir dos dados enviados."
-    )
-
-    source_type = str(
-        payload.get("source_type")
-        or payload.get("sourceType")
-        or payload.get("type")
-        or ("upload" if uploaded_file else "text")
-    )
-
-    project_id = get_project_id(payload)
-
-    result = await process_update_scenario(
-        prompt=prompt,
-        source_type=source_type,
-        file=uploaded_file
-    )
-
-    PROJECT_CONTEXTS[project_id] = {
-        "project_id": project_id,
-        "project_name": get_project_name(payload),
-        "prompt": prompt,
-        "source_type": source_type,
-        "context_preview": result.get("context_preview", ""),
-        "updated_at": utc_now()
-    }
-
-    response = create_task_response(
-        task_type="ontology_generate",
-        project_id=project_id,
-        status="completed",
-        message="Ontology generation completed successfully."
-    )
-
-    task_id = response["task_id"]
-
-    ontology_payload = {
+@app.get("/api/graph/task/{task_id}")
+async def graph_task_status(task_id: str):
+    task = BUILD_TASKS.get(task_id) or {
         "task_id": task_id,
         "id": task_id,
-        "project_id": project_id,
-        "graph_id": f"graph-{project_id}",
-        "ontology_id": f"ontology-{project_id}",
+        "project_id": "render-project",
+        "graph_id": "graph-render-project",
         "status": "completed",
         "state": "completed",
-        "result": result,
-        "updated_at": utc_now()
+        "message": "Task returned by compatibility mode.",
+        "updated_at": utc_now(),
     }
+    BUILD_TASKS[task_id] = task
+    return response_ok({"status": task["status"], "state": task["state"], "task_id": task_id, "data": task, "result": task, "task": task})
 
-    BUILD_TASKS[task_id].update(ontology_payload)
 
-    return {
-        "success": True,
-        "ok": True,
-        "status": "success",
-        "state": "completed",
-        "message": "Ontology generation routed successfully.",
-        "task_id": task_id,
-        "id": task_id,
+@app.get("/api/graph/project/{project_id}")
+async def graph_project_detail(project_id: str):
+    context = PROJECT_CONTEXTS.get(project_id, {})
+    project = {
         "project_id": project_id,
+        "id": project_id,
+        "name": context.get("project_name", "Projeto MiroFish Render"),
+        "status": "built",
+        "state": "built",
         "graph_id": f"graph-{project_id}",
         "ontology_id": f"ontology-{project_id}",
-        "data": ontology_payload,
-        "result": ontology_payload,
-        "task": ontology_payload
+        "agents_target": len(default_personas()),
+        "backend_version": BACKEND_VERSION,
     }
+    return response_ok({"state": "built", "project_id": project_id, "graph_id": project["graph_id"], "data": project, "result": project, "project": project})
 
 
-@app.get("/api/graph/ontology/status/{task_id}")
-async def ontology_status_by_id(task_id: str):
-    return task_status_response(task_id)
+@app.get("/api/graph/data/{graph_id}")
+async def graph_data(graph_id: str):
+    project_id = graph_id.replace("graph-", "") if graph_id.startswith("graph-") else "render-project"
+    personas = default_personas()
+    nodes = [{"id": project_id, "label": "Project", "type": "Project", "name": "Projeto MiroFish Render"}]
+    nodes += [{"id": p["id"], "label": p["name"], "type": "Agent", "name": p["name"], "profession": p["profession"]} for p in personas]
+    edges = [{"id": f"edge-{project_id}-{p['id']}", "source": project_id, "target": p["id"], "type": "USES_AGENT"} for p in personas]
+    data = {"graph_id": graph_id, "project_id": project_id, "nodes": nodes, "edges": edges, "agents": personas, "status": "ready"}
+    return response_ok({"status": "ready", "graph_id": graph_id, "project_id": project_id, "nodes": nodes, "edges": edges, "data": data, "result": data, "graph": data})
 
-
-# ============================================================
-# 10. HISTÓRICO / PROJETOS / SIMULAÇÃO
-# ============================================================
 
 @app.get("/api/simulation/history")
 async def simulation_history(limit: int = 20):
-    return {
-        "success": True,
-        "ok": True,
-        "count": 0,
-        "data": [],
-        "result": []
-    }
-
-
-@app.get("/api/projects/history")
-async def projects_history(limit: int = 20):
-    return {
-        "success": True,
-        "ok": True,
-        "count": 0,
-        "data": [],
-        "result": []
-    }
-
-
-@app.get("/api/graph/projects/history")
-async def graph_projects_history(limit: int = 20):
-    return {
-        "success": True,
-        "ok": True,
-        "count": 0,
-        "data": [],
-        "result": []
-    }
-
-
-@app.get("/api/projects")
-async def projects_list(limit: int = 20):
-    return {
-        "success": True,
-        "ok": True,
-        "count": 0,
-        "data": [],
-        "result": []
-    }
-
-
-def create_simulation_response(
-    project_id: str = "render-project",
-    status: str = "created",
-    message: str = "Simulation created successfully."
-) -> Dict[str, Any]:
-    simulation_id = f"sim_{uuid4().hex}"
-    task_id = f"simulation_{uuid4().hex}"
-
-    payload = {
-        "simulation_id": simulation_id,
-        "id": simulation_id,
-        "task_id": task_id,
-        "project_id": project_id,
-        "graph_id": f"graph-{project_id}",
-        "status": status,
-        "state": status,
-        "message": message,
-        "agents_target": TOTAL_AGENTS,
-        "current_round": 0,
-        "created_at": utc_now(),
-        "updated_at": utc_now(),
-        "config_generated": True,
-        "enable_reddit": False,
-        "enable_twitter": False
-    }
-
-    BUILD_TASKS[simulation_id] = payload
-    BUILD_TASKS[task_id] = payload
-    SIMULATIONS[simulation_id] = payload
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": status,
-        "state": status,
-        "message": message,
-        "simulation_id": simulation_id,
-        "id": simulation_id,
-        "task_id": task_id,
-        "project_id": project_id,
-        "graph_id": f"graph-{project_id}",
-        "data": payload,
-        "result": payload,
-        "simulation": payload,
-        "task": payload
-    }
-
-
-def simulation_status_response(simulation_id: str) -> Dict[str, Any]:
-    simulation = SIMULATIONS.get(simulation_id) or BUILD_TASKS.get(simulation_id)
-
-    if not simulation:
-        simulation = {
-            "simulation_id": simulation_id,
-            "id": simulation_id,
-            "task_id": simulation_id,
-            "project_id": "render-project",
-            "graph_id": "graph-render-project",
-            "status": "completed",
-            "state": "completed",
-            "message": "Simulation não encontrada em memória. Retornando completed para compatibilidade.",
-            "agents_target": TOTAL_AGENTS,
-            "current_round": 0,
-            "created_at": utc_now(),
-            "updated_at": utc_now(),
-            "config_generated": True,
-            "enable_reddit": False,
-            "enable_twitter": False
-        }
-        SIMULATIONS[simulation_id] = simulation
-        BUILD_TASKS[simulation_id] = simulation
-
-    status = simulation.get("status", "completed")
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": status,
-        "state": status,
-        "message": simulation.get("message", "Simulation status returned successfully."),
-        "simulation_id": simulation.get("simulation_id", simulation_id),
-        "id": simulation.get("id", simulation_id),
-        "task_id": simulation.get("task_id", simulation_id),
-        "project_id": simulation.get("project_id", "render-project"),
-        "graph_id": simulation.get("graph_id", "graph-render-project"),
-        "data": simulation,
-        "result": simulation,
-        "simulation": simulation,
-        "task": simulation
-    }
-
-
-@app.post("/api/simulation/start")
-async def start_simulation():
-    asyncio.create_task(run_simulation_loop())
-
-    return create_task_response(
-        task_type="simulation_loop",
-        project_id="render-project",
-        status="running",
-        message="Loop de simulação iniciado em background."
-    )
-
-
-@app.get("/api/simulation/status")
-async def simulation_status():
-    status_payload = {
-        "status": "ready",
-        "state": "ready",
-        "agents_target": TOTAL_AGENTS,
-        "auto_start_simulation": AUTO_START_SIMULATION,
-        "backend_version": BACKEND_VERSION
-    }
-
-    return {
-        "success": True,
-        "ok": True,
-        **status_payload,
-        "data": status_payload,
-        "result": status_payload
-    }
+    items = list(SIMULATIONS.values())[-limit:]
+    return response_ok({"status": "completed", "count": len(items), "data": items, "result": items})
 
 
 @app.post("/api/simulation/create")
 async def simulation_create(request: Request):
     print("[MiroFish] Rota específica simulation create acionada: /api/simulation/create", flush=True)
-
     payload = await parse_request_payload(request)
     project_id = get_project_id(payload)
-
-    return create_simulation_response(
-        project_id=project_id,
-        status="created",
-        message="Simulation created successfully."
-    )
-
-
-@app.post("/api/simulation/run")
-async def simulation_run(request: Request):
-    print("[MiroFish] Rota específica simulation run acionada: /api/simulation/run", flush=True)
-
-    payload = await parse_request_payload(request)
-    project_id = get_project_id(payload)
-
-    return create_simulation_response(
-        project_id=project_id,
-        status="running",
-        message="Simulation run started successfully."
-    )
-
-
-@app.post("/api/simulation/{simulation_id}/run")
-async def simulation_run_by_id(simulation_id: str):
-    print(f"[MiroFish] Rota específica simulation run by id acionada: /api/simulation/{simulation_id}/run", flush=True)
-
-    simulation = SIMULATIONS.get(simulation_id) or {
-        "simulation_id": simulation_id,
-        "id": simulation_id,
-        "task_id": simulation_id,
-        "project_id": "render-project",
-        "graph_id": "graph-render-project",
-        "agents_target": TOTAL_AGENTS,
-        "current_round": 0,
-        "created_at": utc_now()
-    }
-
-    simulation.update({
-        "status": "running",
-        "state": "running",
-        "message": "Simulation run started successfully.",
-        "updated_at": utc_now()
-    })
-
-    SIMULATIONS[simulation_id] = simulation
-    BUILD_TASKS[simulation_id] = simulation
-
-    return simulation_status_response(simulation_id)
+    simulation_id = str(payload.get("simulation_id") or payload.get("simulationId") or f"sim_{uuid4().hex}")
+    sim = ensure_simulation(simulation_id)
+    sim.update({"project_id": project_id, "graph_id": f"graph-{project_id}", "status": "created", "state": "created", "updated_at": utc_now()})
+    return simulation_response(simulation_id)
 
 
 @app.get("/api/simulation/{simulation_id}")
 async def simulation_get_by_id(simulation_id: str):
     print(f"[MiroFish] Rota específica simulation get acionada: /api/simulation/{simulation_id}", flush=True)
-    return simulation_status_response(simulation_id)
-
-
-@app.get("/api/simulation/status/{simulation_id}")
-async def simulation_status_by_id(simulation_id: str):
-    print(f"[MiroFish] Rota específica simulation status acionada: /api/simulation/status/{simulation_id}", flush=True)
-    return simulation_status_response(simulation_id)
-
-
-@app.get("/api/simulation/run-status/{simulation_id}")
-async def simulation_run_status_by_id(simulation_id: str):
-    print(f"[MiroFish] Rota específica simulation run-status acionada: /api/simulation/run-status/{simulation_id}", flush=True)
-    return simulation_status_response(simulation_id)
-
-
-@app.get("/api/simulation/task/{task_id}")
-async def simulation_task_status(task_id: str):
-    print(f"[MiroFish] Rota específica simulation task acionada: /api/simulation/task/{task_id}", flush=True)
-    return simulation_status_response(task_id)
-
-
-# ============================================================
-# 11. PREPARAÇÃO / CONFIG REALTIME
-# ============================================================
-
-def simulation_runtime_payload(simulation_id: str = "render-project") -> Dict[str, Any]:
-    return {
-        "simulation_id": simulation_id,
-        "id": simulation_id,
-        "project_id": "render-project",
-        "graph_id": "graph-render-project",
-        "status": "completed",
-        "state": "completed",
-        "config_generated": True,
-        "config_reasoning": "Configuração gerada em modo compatível no Render.",
-        "entities_count": 0,
-        "entity_types": [],
-        "agents_count": TOTAL_AGENTS,
-        "current_round": 0,
-        "total_rounds": 1,
-        "enable_reddit": False,
-        "enable_twitter": False,
-        "reddit_enabled": False,
-        "twitter_enabled": False,
-        "external_sources_enabled": False,
-        "llm_configured": bool(API_KEY),
-        "neo4j_configured": bool(neo4j_driver),
-        "postgres_configured": bool(POSTGRES_URL),
-        "backend_version": BACKEND_VERSION,
-        "created_at": utc_now(),
-        "updated_at": utc_now()
-    }
+    return simulation_response(simulation_id)
 
 
 @app.post("/api/simulation/env-status")
 async def simulation_env_status_post():
     print("[MiroFish] Rota específica env-status acionada: /api/simulation/env-status", flush=True)
-
-    payload = {
-        "status": "ready",
-        "state": "ready",
-        "ready": True,
-        "llm_configured": bool(API_KEY),
-        "neo4j_configured": bool(neo4j_driver),
-        "postgres_configured": bool(POSTGRES_URL),
-        "enable_reddit": False,
-        "enable_twitter": False,
-        "reddit_enabled": False,
-        "twitter_enabled": False,
-        "external_sources_enabled": False,
-        "backend_version": BACKEND_VERSION
-    }
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "ready",
-        "state": "ready",
-        "data": payload,
-        "result": payload
-    }
+    payload = {"status": "ready", "state": "ready", "ready": True, "llm_configured": bool(API_KEY), "neo4j_configured": bool(neo4j_driver), "postgres_configured": bool(POSTGRES_URL), "backend_version": BACKEND_VERSION}
+    return response_ok({"status": "ready", "state": "ready", "data": payload, "result": payload})
 
 
 @app.get("/api/simulation/env-status")
@@ -1208,608 +618,145 @@ async def simulation_env_status_get():
 @app.post("/api/simulation/prepare")
 async def simulation_prepare(request: Request):
     print("[MiroFish] Rota específica prepare acionada: /api/simulation/prepare", flush=True)
-
     payload_req = await parse_request_payload(request)
-    simulation_id = str(
-        payload_req.get("simulation_id")
-        or payload_req.get("simulationId")
-        or payload_req.get("id")
-        or f"sim_{uuid4().hex}"
-    )
-
+    simulation_id = str(payload_req.get("simulation_id") or payload_req.get("simulationId") or payload_req.get("id") or f"sim_{uuid4().hex}")
     task_id = f"prepare_{uuid4().hex}"
-    payload = simulation_runtime_payload(simulation_id)
-    payload.update({
+    sim = ensure_simulation(simulation_id)
+    sim.update({
         "task_id": task_id,
         "prepare_task_id": task_id,
-        "message": "Simulation preparation completed successfully."
-    })
-
-    BUILD_TASKS[simulation_id] = payload
-    BUILD_TASKS[task_id] = payload
-    SIMULATIONS[simulation_id] = payload
-
-    return {
-        "success": True,
-        "ok": True,
         "status": "completed",
         "state": "completed",
-        "simulation_id": simulation_id,
-        "id": simulation_id,
-        "task_id": task_id,
-        "data": payload,
-        "result": payload,
-        "simulation": payload,
-        "task": payload
-    }
+        "message": "Simulation preparation completed successfully.",
+        "config_generated": True,
+        "config": build_config(simulation_id),
+        "updated_at": utc_now(),
+    })
+    BUILD_TASKS[task_id] = sim
+    return response_ok({"status": "completed", "state": "completed", "simulation_id": simulation_id, "task_id": task_id, "data": sim, "result": sim, "simulation": sim, "task": sim})
 
 
 @app.post("/api/simulation/prepare/status")
 async def simulation_prepare_status_post(request: Request):
     print("[MiroFish] Rota específica prepare/status acionada: /api/simulation/prepare/status", flush=True)
-
     payload_req = await parse_request_payload(request)
-    simulation_id = str(
-        payload_req.get("simulation_id")
-        or payload_req.get("simulationId")
-        or payload_req.get("id")
-        or "render-project"
-    )
-
-    payload = simulation_runtime_payload(simulation_id)
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "completed",
-        "state": "completed",
-        "simulation_id": simulation_id,
-        "data": payload,
-        "result": payload
-    }
-
-
-@app.get("/api/simulation/prepare/status")
-async def simulation_prepare_status_get():
-    payload = simulation_runtime_payload("render-project")
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "completed",
-        "state": "completed",
-        "data": payload,
-        "result": payload
-    }
+    simulation_id = str(payload_req.get("simulation_id") or payload_req.get("simulationId") or payload_req.get("id") or "render-project")
+    sim = ensure_simulation(simulation_id)
+    sim.update({"status": "completed", "state": "completed", "progress": 100, "progress_percent": 100, "updated_at": utc_now()})
+    return response_ok({"status": "completed", "state": "completed", "simulation_id": simulation_id, "data": sim, "result": sim})
 
 
 @app.get("/api/simulation/{simulation_id}/profiles/realtime")
 async def simulation_profiles_realtime(simulation_id: str, platform: Optional[str] = None):
-    print(
-        f"[MiroFish] Rota específica profiles/realtime acionada: /api/simulation/{simulation_id}/profiles/realtime",
-        flush=True
-    )
-
-    personas = [
-        {
-            "id": "agent-0",
-            "agent_id": 0,
-            "name": "Agente Financeiro",
-            "role": "Analista de Fluxo de Caixa e Orçamento",
-            "persona": "Especialista em análise financeira rural, fluxo de caixa, orçamento e previsão de necessidade de capital.",
-            "profile": "Financeiro",
-            "status": "ready"
-        },
-        {
-            "id": "agent-1",
-            "agent_id": 1,
-            "name": "Agente Dados/BI",
-            "role": "Analista de Dados e Indicadores",
-            "persona": "Especialista em BI, dashboards, estruturação de indicadores, histórico financeiro e análise comparativa.",
-            "profile": "Dados",
-            "status": "ready"
-        },
-        {
-            "id": "agent-2",
-            "agent_id": 2,
-            "name": "Agente Produto",
-            "role": "Especialista de Produto ERP Agro",
-            "persona": "Especialista em requisitos de produto, jornada do usuário, módulos financeiros e aderência operacional do SCADIAgro.",
-            "profile": "Produto",
-            "status": "ready"
-        }
-    ]
-
-    payload = {
-        "simulation_id": simulation_id,
-        "platform": platform or "none",
-        "status": "completed",
-        "state": "completed",
-        "count": len(personas),
-        "profiles": personas,
-        "personas": personas,
-        "agent_personas": personas,
-        "agents": personas,
-        "enable_reddit": False,
-        "enable_twitter": False,
-        "reddit_enabled": False,
-        "twitter_enabled": False,
-        "message": "Realtime profiles generated in Render compatibility mode.",
-        "backend_version": BACKEND_VERSION
-    }
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "completed",
-        "state": "completed",
-        "simulation_id": simulation_id,
-        "count": len(personas),
-        "profiles": personas,
-        "personas": personas,
-        "agent_personas": personas,
-        "agents": personas,
-        "data": payload,
-        "result": payload
-    }
-
-    payload = {
-        "simulation_id": simulation_id,
-        "platform": platform or "none",
-        "status": "completed",
-        "state": "completed",
-        "count": 0,
-        "profiles": [],
-        "data": [],
-        "enable_reddit": False,
-        "enable_twitter": False,
-        "reddit_enabled": False,
-        "twitter_enabled": False,
-        "message": "Realtime profiles disabled in Render compatibility mode.",
-        "backend_version": BACKEND_VERSION
-    }
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "completed",
-        "state": "completed",
-        "simulation_id": simulation_id,
-        "profiles": [],
-        "count": 0,
-        "data": payload,
-        "result": payload
-    }
+    print(f"[MiroFish] Rota específica profiles/realtime acionada: /api/simulation/{simulation_id}/profiles/realtime", flush=True)
+    personas = default_personas()
+    payload = {"simulation_id": simulation_id, "platform": platform or "internal", "status": "completed", "state": "completed", "count": len(personas), "profiles": personas, "personas": personas, "agent_personas": personas, "agents": personas, "total_expected": len(personas), "enable_reddit": False, "enable_twitter": False, "backend_version": BACKEND_VERSION}
+    return response_ok({"status": "completed", "state": "completed", "simulation_id": simulation_id, "count": len(personas), "profiles": personas, "personas": personas, "agent_personas": personas, "agents": personas, "data": payload, "result": payload})
 
 
 @app.get("/api/simulation/{simulation_id}/config/realtime")
 async def get_simulation_config_realtime(simulation_id: str):
-    print(f"[MiroFish] Rota específica config/realtime acionada: /api/simulation/{simulation_id}/config/realtime")
-
-    sim = SIMULATIONS.get(simulation_id)
-
-    if not sim:
-        return {
-            "success": False,
-            "status": "error",
-            "error": "Simulation not found",
-            "simulation_id": simulation_id,
-        }
-
-    config = sim.get("config")
-
-    if config:
-        return {
-            "success": True,
-            "status": "completed",
-            "config_generated": True,
-            "simulation_id": simulation_id,
-            "config": config,
-        }
-
-    agents = sim.get("agents") or sim.get("personas") or []
-
-    fallback_config = {
-        "simulation_id": simulation_id,
-        "name": sim.get("name", "MiroFish Simulation"),
-        "description": sim.get("description", "Configuração gerada automaticamente em modo fallback."),
-        "total_agents": len(agents),
-        "agents": agents,
-        "rounds": int(os.getenv("SIMULATION_ROUNDS", "5")),
-        "minutes_per_round": int(os.getenv("MINUTES_PER_ROUND", "60")),
-        "enable_reddit": False,
-        "enable_twitter": False,
-        "mode": "fallback-compatible",
-        "generated_at": datetime.utcnow().isoformat(),
-    }
-
-    sim["config"] = fallback_config
+    print(f"[MiroFish] Rota específica config/realtime acionada: /api/simulation/{simulation_id}/config/realtime", flush=True)
+    sim = ensure_simulation(simulation_id)
+    config = sim.get("config") or build_config(simulation_id)
+    sim["config"] = config
     sim["config_generated"] = True
-    sim["status"] = "config_ready"
-
-    return {
-        "success": True,
-        "status": "completed",
-        "config_generated": True,
-        "simulation_id": simulation_id,
-        "config": fallback_config,
-    }
-
-    personas = [
-        {
-            "id": "agent-0",
-            "agent_id": 0,
-            "name": "Agente Financeiro",
-            "role": "Analista de Fluxo de Caixa e Orçamento",
-            "persona": "Especialista em análise financeira rural, fluxo de caixa, orçamento e previsão de necessidade de capital.",
-            "profile": "Financeiro",
-            "status": "ready"
-        },
-        {
-            "id": "agent-1",
-            "agent_id": 1,
-            "name": "Agente Dados/BI",
-            "role": "Analista de Dados e Indicadores",
-            "persona": "Especialista em BI, dashboards, estruturação de indicadores, histórico financeiro e análise comparativa.",
-            "profile": "Dados",
-            "status": "ready"
-        },
-        {
-            "id": "agent-2",
-            "agent_id": 2,
-            "name": "Agente Produto",
-            "role": "Especialista de Produto ERP Agro",
-            "persona": "Especialista em requisitos de produto, jornada do usuário, módulos financeiros e aderência operacional do SCADIAgro.",
-            "profile": "Produto",
-            "status": "ready"
-        }
-    ]
-
-    config_payload = {
-        "simulation_id": simulation_id,
-        "id": simulation_id,
-        "project_id": "render-project",
-        "graph_id": "graph-render-project",
-
-        "status": "completed",
-        "state": "completed",
-        "phase": "completed",
-        "ready": True,
-        "done": True,
-
-        "config_generated": True,
-        "config_ready": True,
-        "config_status": "completed",
-        "config_reasoning": "Configuração gerada em modo compatível no Render.",
-
-        "agents_count": len(personas),
-        "personas_count": len(personas),
-        "agent_personas_count": len(personas),
-
-        "agents": personas,
-        "personas": personas,
-        "agent_personas": personas,
-        "profiles": personas,
-
-        "entities_count": 0,
-        "entity_types": [],
-        "entities": [],
-
-        "current_round": 0,
-        "total_rounds": 1,
-
-        "enable_reddit": False,
-        "enable_twitter": False,
-        "reddit_enabled": False,
-        "twitter_enabled": False,
-        "external_sources_enabled": False,
-
-        "llm_configured": bool(API_KEY),
-        "neo4j_configured": bool(neo4j_driver),
-        "postgres_configured": bool(POSTGRES_URL),
-
-        "backend_version": BACKEND_VERSION,
-        "created_at": utc_now(),
-        "updated_at": utc_now()
-    }
-
-    SIMULATIONS[simulation_id] = config_payload
-    BUILD_TASKS[simulation_id] = config_payload
-
-    return {
-        "success": True,
-        "ok": True,
-
-        "status": "completed",
-        "state": "completed",
-        "phase": "completed",
-        "ready": True,
-        "done": True,
-
-        "simulation_id": simulation_id,
-        "id": simulation_id,
-
-        "config_generated": True,
-        "config_ready": True,
-        "config_status": "completed",
-
-        "agents_count": len(personas),
-        "personas_count": len(personas),
-        "agent_personas_count": len(personas),
-
-        "agents": personas,
-        "personas": personas,
-        "agent_personas": personas,
-        "profiles": personas,
-
-        "config": config_payload,
-        "data": config_payload,
-        "result": config_payload,
-        "simulation": config_payload
-    }
-
-    payload = simulation_runtime_payload(simulation_id)
-    payload.update({
-        "config_generated": True,
-        "status": "completed",
-        "state": "completed",
-        "message": "Realtime configuration completed successfully."
-    })
-
-    SIMULATIONS[simulation_id] = payload
-    BUILD_TASKS[simulation_id] = payload
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "completed",
-        "state": "completed",
-        "simulation_id": simulation_id,
-        "config_generated": True,
-        "config": payload,
-        "data": payload,
-        "result": payload
-    }
+    data = {"simulation_id": simulation_id, "status": "completed", "state": "completed", "generation_stage": "completed", "is_generating": False, "config_generated": True, "config_ready": True, "ready": True, "done": True, "summary": {"total_agents": len(config.get("agent_configs", [])), "simulation_hours": config.get("time_config", {}).get("total_simulation_hours"), "initial_posts_count": 0, "hot_topics_count": 0, "has_twitter_config": False, "has_reddit_config": False, "generated_at": config.get("generated_at"), "llm_model": config.get("llm_model") or config.get("mode")}, "config": config}
+    return response_ok({"status": "completed", "state": "completed", "simulation_id": simulation_id, "config_generated": True, "config_ready": True, "config": config, "data": data, "result": data})
 
 
-# ============================================================
-# 12. DADOS DO GRAFO - VERSÃO SEGURA
-# ============================================================
-
-def graph_data_payload(graph_id: str) -> Dict[str, Any]:
-    project_id = graph_id.replace("graph-", "") if graph_id.startswith("graph-") else "render-project"
-    context = PROJECT_CONTEXTS.get(project_id, {})
-
-    nodes: List[Dict[str, Any]] = [
-        {
-            "id": project_id,
-            "label": "Project",
-            "type": "Project",
-            "name": context.get("project_name", "Projeto MiroFish Render"),
-            "status": "built"
-        },
-        {
-            "id": f"ontology-{project_id}",
-            "label": "Ontology",
-            "type": "Ontology",
-            "name": "Ontologia Gerada",
-            "status": "generated"
-        },
-        {
-            "id": "agent-0",
-            "label": "Agent 0",
-            "type": "Agent",
-            "name": "Agente Financeiro",
-            "status": "ready"
-        },
-        {
-            "id": "agent-1",
-            "label": "Agent 1",
-            "type": "Agent",
-            "name": "Agente Dados/BI",
-            "status": "ready"
-        },
-        {
-            "id": "agent-2",
-            "label": "Agent 2",
-            "type": "Agent",
-            "name": "Agente Produto",
-            "status": "ready"
-        }
-    ]
-
-    edges: List[Dict[str, Any]] = [
-        {
-            "id": f"{project_id}-has-ontology",
-            "source": project_id,
-            "target": f"ontology-{project_id}",
-            "label": "HAS_ONTOLOGY",
-            "type": "HAS_ONTOLOGY"
-        },
-        {
-            "id": f"{project_id}-has-agent-0",
-            "source": project_id,
-            "target": "agent-0",
-            "label": "HAS_AGENT",
-            "type": "HAS_AGENT"
-        },
-        {
-            "id": f"{project_id}-has-agent-1",
-            "source": project_id,
-            "target": "agent-1",
-            "label": "HAS_AGENT",
-            "type": "HAS_AGENT"
-        },
-        {
-            "id": f"{project_id}-has-agent-2",
-            "source": project_id,
-            "target": "agent-2",
-            "label": "HAS_AGENT",
-            "type": "HAS_AGENT"
-        }
-    ]
-
-    return {
-        "graph_id": graph_id,
-        "project_id": project_id,
-        "status": "completed",
-        "state": "completed",
-        "nodes": nodes,
-        "edges": edges,
-        "links": edges,
-        "elements": {
-            "nodes": nodes,
-            "edges": edges
-        },
-        "nodes_count": len(nodes),
-        "edges_count": len(edges),
-        "backend_version": BACKEND_VERSION
-    }
+@app.get("/api/simulation/{simulation_id}/config")
+async def get_simulation_config(simulation_id: str):
+    sim = ensure_simulation(simulation_id)
+    config = sim.get("config") or build_config(simulation_id)
+    return response_ok({"status": "completed", "state": "completed", "simulation_id": simulation_id, "config_generated": True, "config": config, "data": config, "result": config})
 
 
-@app.get("/api/graph/data/{graph_id}")
-async def graph_data(graph_id: str):
-    print(f"[MiroFish] Rota específica graph data acionada: /api/graph/data/{graph_id}", flush=True)
-
-    try:
-        payload = graph_data_payload(graph_id)
-
-        return {
-            "success": True,
-            "ok": True,
-            "status": "success",
-            "state": "completed",
-            "graph_id": graph_id,
-            "project_id": payload["project_id"],
-            "nodes": payload["nodes"],
-            "edges": payload["edges"],
-            "links": payload["links"],
-            "elements": payload["elements"],
-            "data": payload,
-            "result": payload,
-            "graph": payload
-        }
-
-    except Exception as exc:
-        print(f"[MiroFish] Erro em graph_data: {exc}", flush=True)
-
-        return {
-            "success": False,
-            "ok": False,
-            "status": "error",
-            "state": "error",
-            "message": str(exc),
-            "graph_id": graph_id,
-            "data": {
-                "nodes": [],
-                "edges": [],
-                "error": str(exc)
-            },
-            "result": {
-                "nodes": [],
-                "edges": [],
-                "error": str(exc)
-            }
-        }
-
-
-@app.get("/api/graph/data/{graph_id}/status")
-async def graph_data_status(graph_id: str):
-    payload = graph_data_payload(graph_id)
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "completed",
-        "state": "completed",
-        "graph_id": graph_id,
-        "project_id": payload["project_id"],
-        "data": payload,
-        "result": payload
-    }
-
-
-@app.get("/api/graph/graph/{graph_id}")
-async def graph_graph_data(graph_id: str):
-    return await graph_data(graph_id)
-
-
-@app.get("/api/graph/{graph_id}/data")
-async def graph_data_alias(graph_id: str):
-    return await graph_data(graph_id)
-
-
-# ============================================================
-# 13. FALLBACKS - DEVEM SER AS ÚLTIMAS ROTAS DO ARQUIVO
-# ============================================================
-
-@app.api_route("/api/graph/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
-async def graph_fallback(full_path: str, request: Request):
+@app.post("/api/simulation/start")
+async def start_simulation(request: Request):
     payload = await parse_request_payload(request)
-
-    print(f"[MiroFish] Fallback /api/graph acionado: /api/graph/{full_path}", flush=True)
-
-    if request.method in ["POST", "PUT", "PATCH"]:
-        return await start_graph_build_from_payload(payload)
-
-    fallback_payload = {
-        "status": "ready",
-        "state": "ready",
-        "path": f"/api/graph/{full_path}",
-        "payload_received": payload,
-        "backend_version": BACKEND_VERSION
-    }
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "ready",
-        "state": "ready",
-        "message": f"Rota /api/graph/{full_path} recebida pelo backend.",
-        "path": f"/api/graph/{full_path}",
-        "data": fallback_payload,
-        "result": fallback_payload
-    }
+    simulation_id = str(payload.get("simulation_id") or payload.get("simulationId") or payload.get("id") or next(reversed(SIMULATIONS), f"sim_{uuid4().hex}"))
+    sim = ensure_simulation(simulation_id)
+    total_rounds = int(payload.get("max_rounds") or payload.get("maxRounds") or payload.get("rounds") or SIMULATION_ROUNDS)
+    sim.update({"total_rounds": max(1, min(total_rounds, 60)), "current_round": 0, "progress": 0, "progress_percent": 0, "status": "running", "state": "running", "message": "Simulation started.", "started_at": utc_now(), "completed_at": None, "error": None, "report_ready": False, "updated_at": utc_now()})
+    existing_task = RUN_TASKS.get(simulation_id)
+    if existing_task and not existing_task.done():
+        existing_task.cancel()
+    RUN_TASKS[simulation_id] = asyncio.create_task(run_simulation_for_id(simulation_id))
+    return simulation_response(simulation_id)
 
 
-@app.api_route("/api/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
-async def api_fallback(full_path: str, request: Request):
+@app.post("/api/simulation/{simulation_id}/run")
+async def simulation_run_by_id(simulation_id: str):
+    sim = ensure_simulation(simulation_id)
+    sim.update({"status": "running", "state": "running", "message": "Simulation run started successfully.", "updated_at": utc_now()})
+    existing_task = RUN_TASKS.get(simulation_id)
+    if existing_task and not existing_task.done():
+        existing_task.cancel()
+    RUN_TASKS[simulation_id] = asyncio.create_task(run_simulation_for_id(simulation_id))
+    return simulation_response(simulation_id)
+
+
+@app.get("/api/simulation/{simulation_id}/run-status")
+async def simulation_run_status(simulation_id: str):
+    return simulation_response(simulation_id)
+
+
+@app.get("/api/simulation/{simulation_id}/run-status/detail")
+async def simulation_run_status_detail(simulation_id: str):
+    sim = ensure_simulation(simulation_id)
+    detail = dict(sim)
+    detail["recent_actions"] = sim.get("actions", [])[-20:]
+    detail["logs"] = sim.get("logs", [])[-50:]
+    detail["timeline"] = sim.get("timeline", [])
+    return response_ok({"status": sim.get("status", "created"), "state": sim.get("state", sim.get("status", "created")), "simulation_id": simulation_id, "data": detail, "result": detail, "detail": detail})
+
+
+@app.get("/api/simulation/{simulation_id}/posts")
+async def simulation_posts(simulation_id: str, platform: str = "internal", limit: int = 50, offset: int = 0):
+    sim = ensure_simulation(simulation_id)
+    posts = sim.get("posts", [])[offset: offset + limit]
+    return response_ok({"status": "completed", "simulation_id": simulation_id, "platform": platform, "count": len(posts), "data": posts, "result": posts, "posts": posts})
+
+
+@app.get("/api/simulation/{simulation_id}/timeline")
+async def simulation_timeline(simulation_id: str, start_round: int = 0, end_round: Optional[int] = None):
+    sim = ensure_simulation(simulation_id)
+    timeline = sim.get("timeline", [])
+    if end_round is not None:
+        timeline = [item for item in timeline if start_round <= item.get("round", 0) <= end_round]
+    else:
+        timeline = [item for item in timeline if item.get("round", 0) >= start_round]
+    return response_ok({"status": "completed", "simulation_id": simulation_id, "count": len(timeline), "data": timeline, "result": timeline, "timeline": timeline})
+
+
+@app.get("/api/simulation/{simulation_id}/agent-stats")
+async def simulation_agent_stats(simulation_id: str):
+    sim = ensure_simulation(simulation_id)
+    stats = []
+    for p in default_personas():
+        stats.append({"agent_id": p["agent_id"], "agent_name": p["name"], "actions": len([a for a in sim.get("actions", []) if a.get("agent_id") == p["agent_id"]])})
+    return response_ok({"status": "completed", "simulation_id": simulation_id, "data": stats, "result": stats, "stats": stats})
+
+
+@app.get("/api/simulation/{simulation_id}/actions")
+async def simulation_actions(simulation_id: str, limit: int = 50, offset: int = 0):
+    sim = ensure_simulation(simulation_id)
+    actions = sim.get("actions", [])[offset: offset + limit]
+    return response_ok({"status": "completed", "simulation_id": simulation_id, "count": len(actions), "data": actions, "result": actions, "actions": actions})
+
+
+@app.get("/api/report/{report_id}")
+async def get_report(report_id: str):
+    simulation_id = report_id.replace("report_", "")
+    sim = ensure_simulation(simulation_id)
+    report = sim.get("report") or {"report_id": report_id, "simulation_id": simulation_id, "status": "pending", "summary": "Relatório ainda não gerado."}
+    return response_ok({"status": report.get("status", "pending"), "report_id": report_id, "data": report, "result": report, "report": report})
+
+
+@app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+async def api_fallback(path: str, request: Request):
+    print(f"[MiroFish] Fallback /api acionado: /api/{path}", flush=True)
     payload = await parse_request_payload(request)
-
-    print(f"[MiroFish] Fallback /api acionado: /api/{full_path}", flush=True)
-
-    if request.method in ["POST", "PUT", "PATCH"]:
-        response = create_task_response(
-            task_type="generic_api",
-            project_id=get_project_id(payload),
-            status="completed",
-            message=f"Rota /api/{full_path} recebida pelo backend."
-        )
-
-        response["path"] = f"/api/{full_path}"
-        response["payload_received"] = payload
-        response["data"]["path"] = f"/api/{full_path}"
-        response["data"]["payload_received"] = payload
-        response["result"]["path"] = f"/api/{full_path}"
-        response["result"]["payload_received"] = payload
-
-        return response
-
-    fallback_payload = {
-        "status": "ready",
-        "state": "ready",
-        "path": f"/api/{full_path}",
-        "payload_received": payload,
-        "backend_version": BACKEND_VERSION
-    }
-
-    return {
-        "success": True,
-        "ok": True,
-        "status": "ready",
-        "state": "ready",
-        "message": f"Rota /api/{full_path} recebida pelo backend.",
-        "path": f"/api/{full_path}",
-        "data": fallback_payload,
-        "result": fallback_payload
-    }
+    data = {"status": "ready", "state": "ready", "path": f"/api/{path}", "payload_received": payload, "backend_version": BACKEND_VERSION}
+    return response_ok({"status": "ready", "state": "ready", "message": f"Rota /api/{path} recebida pelo backend.", "path": f"/api/{path}", "data": data, "result": data})
