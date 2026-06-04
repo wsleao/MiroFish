@@ -14,10 +14,10 @@ from neo4j import GraphDatabase
 
 # ============================================================
 # MIROFISH ORCHESTRATOR - RENDER COMPATIBLE BACKEND
-# Version: v6-stable-render-backend
+# Version: v7-fallback-compatible
 # ============================================================
 
-BACKEND_VERSION = "mirofish-render-v6-stable-render-backend"
+BACKEND_VERSION = "mirofish-render-v7-fallback-compatible"
 
 
 # ============================================================
@@ -43,6 +43,7 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
 BUILD_TASKS: Dict[str, Dict[str, Any]] = {}
 PROJECT_CONTEXTS: Dict[str, Dict[str, Any]] = {}
+SIMULATIONS: Dict[str, Dict[str, Any]] = {}
 
 
 neo4j_driver = None
@@ -90,6 +91,14 @@ def get_project_name(payload: Optional[dict] = None) -> str:
         or payload.get("name")
         or "Projeto MiroFish Render"
     )
+
+
+def response_ok(payload: Dict[str, Any]) -> Dict[str, Any]:
+    payload.setdefault("success", True)
+    payload.setdefault("ok", True)
+    payload.setdefault("status", "success")
+    payload.setdefault("state", payload.get("status", "success"))
+    return payload
 
 
 async def parse_request_payload(request: Request) -> dict:
@@ -559,7 +568,10 @@ def health_check():
             "/api/graph/data/{graph_id}",
             "/api/graph/build/status/{task_id}",
             "/api/simulation/history",
-            "/api/simulation/create"
+            "/api/simulation/create",
+            "/api/simulation/env-status",
+            "/api/simulation/prepare",
+            "/api/simulation/{simulation_id}/config/realtime"
         ]
     }
 
@@ -675,11 +687,13 @@ async def start_graph_build_from_payload(payload: Optional[dict] = None) -> Dict
         payload=payload
     )
 
+    task = get_task_or_default(task_id)
+
     response["status"] = "completed"
     response["state"] = "completed"
-    response["data"] = get_task_or_default(task_id)
-    response["result"] = get_task_or_default(task_id)
-    response["task"] = get_task_or_default(task_id)
+    response["data"] = task
+    response["result"] = task
+    response["task"] = task
 
     return response
 
@@ -941,11 +955,15 @@ def create_simulation_response(
         "agents_target": TOTAL_AGENTS,
         "current_round": 0,
         "created_at": utc_now(),
-        "updated_at": utc_now()
+        "updated_at": utc_now(),
+        "config_generated": True,
+        "enable_reddit": False,
+        "enable_twitter": False
     }
 
     BUILD_TASKS[simulation_id] = payload
     BUILD_TASKS[task_id] = payload
+    SIMULATIONS[simulation_id] = payload
 
     return {
         "success": True,
@@ -966,7 +984,7 @@ def create_simulation_response(
 
 
 def simulation_status_response(simulation_id: str) -> Dict[str, Any]:
-    simulation = BUILD_TASKS.get(simulation_id)
+    simulation = SIMULATIONS.get(simulation_id) or BUILD_TASKS.get(simulation_id)
 
     if not simulation:
         simulation = {
@@ -981,8 +999,12 @@ def simulation_status_response(simulation_id: str) -> Dict[str, Any]:
             "agents_target": TOTAL_AGENTS,
             "current_round": 0,
             "created_at": utc_now(),
-            "updated_at": utc_now()
+            "updated_at": utc_now(),
+            "config_generated": True,
+            "enable_reddit": False,
+            "enable_twitter": False
         }
+        SIMULATIONS[simulation_id] = simulation
         BUILD_TASKS[simulation_id] = simulation
 
     status = simulation.get("status", "completed")
@@ -1068,7 +1090,7 @@ async def simulation_run(request: Request):
 async def simulation_run_by_id(simulation_id: str):
     print(f"[MiroFish] Rota específica simulation run by id acionada: /api/simulation/{simulation_id}/run", flush=True)
 
-    simulation = BUILD_TASKS.get(simulation_id) or {
+    simulation = SIMULATIONS.get(simulation_id) or {
         "simulation_id": simulation_id,
         "id": simulation_id,
         "task_id": simulation_id,
@@ -1086,6 +1108,7 @@ async def simulation_run_by_id(simulation_id: str):
         "updated_at": utc_now()
     })
 
+    SIMULATIONS[simulation_id] = simulation
     BUILD_TASKS[simulation_id] = simulation
 
     return simulation_status_response(simulation_id)
@@ -1116,7 +1139,219 @@ async def simulation_task_status(task_id: str):
 
 
 # ============================================================
-# 11. DADOS DO GRAFO - VERSÃO SEGURA
+# 11. PREPARAÇÃO / CONFIG REALTIME
+# ============================================================
+
+def simulation_runtime_payload(simulation_id: str = "render-project") -> Dict[str, Any]:
+    return {
+        "simulation_id": simulation_id,
+        "id": simulation_id,
+        "project_id": "render-project",
+        "graph_id": "graph-render-project",
+        "status": "completed",
+        "state": "completed",
+        "config_generated": True,
+        "config_reasoning": "Configuração gerada em modo compatível no Render.",
+        "entities_count": 0,
+        "entity_types": [],
+        "agents_count": TOTAL_AGENTS,
+        "current_round": 0,
+        "total_rounds": 1,
+        "enable_reddit": False,
+        "enable_twitter": False,
+        "reddit_enabled": False,
+        "twitter_enabled": False,
+        "external_sources_enabled": False,
+        "llm_configured": bool(API_KEY),
+        "neo4j_configured": bool(neo4j_driver),
+        "postgres_configured": bool(POSTGRES_URL),
+        "backend_version": BACKEND_VERSION,
+        "created_at": utc_now(),
+        "updated_at": utc_now()
+    }
+
+
+@app.post("/api/simulation/env-status")
+async def simulation_env_status_post():
+    print("[MiroFish] Rota específica env-status acionada: /api/simulation/env-status", flush=True)
+
+    payload = {
+        "status": "ready",
+        "state": "ready",
+        "ready": True,
+        "llm_configured": bool(API_KEY),
+        "neo4j_configured": bool(neo4j_driver),
+        "postgres_configured": bool(POSTGRES_URL),
+        "enable_reddit": False,
+        "enable_twitter": False,
+        "reddit_enabled": False,
+        "twitter_enabled": False,
+        "external_sources_enabled": False,
+        "backend_version": BACKEND_VERSION
+    }
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "ready",
+        "state": "ready",
+        "data": payload,
+        "result": payload
+    }
+
+
+@app.get("/api/simulation/env-status")
+async def simulation_env_status_get():
+    return await simulation_env_status_post()
+
+
+@app.post("/api/simulation/prepare")
+async def simulation_prepare(request: Request):
+    print("[MiroFish] Rota específica prepare acionada: /api/simulation/prepare", flush=True)
+
+    payload_req = await parse_request_payload(request)
+    simulation_id = str(
+        payload_req.get("simulation_id")
+        or payload_req.get("simulationId")
+        or payload_req.get("id")
+        or f"sim_{uuid4().hex}"
+    )
+
+    task_id = f"prepare_{uuid4().hex}"
+    payload = simulation_runtime_payload(simulation_id)
+    payload.update({
+        "task_id": task_id,
+        "prepare_task_id": task_id,
+        "message": "Simulation preparation completed successfully."
+    })
+
+    BUILD_TASKS[simulation_id] = payload
+    BUILD_TASKS[task_id] = payload
+    SIMULATIONS[simulation_id] = payload
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "completed",
+        "state": "completed",
+        "simulation_id": simulation_id,
+        "id": simulation_id,
+        "task_id": task_id,
+        "data": payload,
+        "result": payload,
+        "simulation": payload,
+        "task": payload
+    }
+
+
+@app.post("/api/simulation/prepare/status")
+async def simulation_prepare_status_post(request: Request):
+    print("[MiroFish] Rota específica prepare/status acionada: /api/simulation/prepare/status", flush=True)
+
+    payload_req = await parse_request_payload(request)
+    simulation_id = str(
+        payload_req.get("simulation_id")
+        or payload_req.get("simulationId")
+        or payload_req.get("id")
+        or "render-project"
+    )
+
+    payload = simulation_runtime_payload(simulation_id)
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "completed",
+        "state": "completed",
+        "simulation_id": simulation_id,
+        "data": payload,
+        "result": payload
+    }
+
+
+@app.get("/api/simulation/prepare/status")
+async def simulation_prepare_status_get():
+    payload = simulation_runtime_payload("render-project")
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "completed",
+        "state": "completed",
+        "data": payload,
+        "result": payload
+    }
+
+
+@app.get("/api/simulation/{simulation_id}/profiles/realtime")
+async def simulation_profiles_realtime(simulation_id: str, platform: Optional[str] = None):
+    print(
+        f"[MiroFish] Rota específica profiles/realtime acionada: /api/simulation/{simulation_id}/profiles/realtime",
+        flush=True
+    )
+
+    payload = {
+        "simulation_id": simulation_id,
+        "platform": platform or "none",
+        "status": "completed",
+        "state": "completed",
+        "count": 0,
+        "profiles": [],
+        "data": [],
+        "enable_reddit": False,
+        "enable_twitter": False,
+        "reddit_enabled": False,
+        "twitter_enabled": False,
+        "message": "Realtime profiles disabled in Render compatibility mode.",
+        "backend_version": BACKEND_VERSION
+    }
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "completed",
+        "state": "completed",
+        "simulation_id": simulation_id,
+        "profiles": [],
+        "count": 0,
+        "data": payload,
+        "result": payload
+    }
+
+
+@app.get("/api/simulation/{simulation_id}/config/realtime")
+async def simulation_config_realtime(simulation_id: str):
+    print(
+        f"[MiroFish] Rota específica config/realtime acionada: /api/simulation/{simulation_id}/config/realtime",
+        flush=True
+    )
+
+    payload = simulation_runtime_payload(simulation_id)
+    payload.update({
+        "config_generated": True,
+        "status": "completed",
+        "state": "completed",
+        "message": "Realtime configuration completed successfully."
+    })
+
+    SIMULATIONS[simulation_id] = payload
+    BUILD_TASKS[simulation_id] = payload
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "completed",
+        "state": "completed",
+        "simulation_id": simulation_id,
+        "config_generated": True,
+        "config": payload,
+        "data": payload,
+        "result": payload
+    }
+
+
+# ============================================================
+# 12. DADOS DO GRAFO - VERSÃO SEGURA
 # ============================================================
 
 def graph_data_payload(graph_id: str) -> Dict[str, Any]:
@@ -1283,7 +1518,7 @@ async def graph_data_alias(graph_id: str):
 
 
 # ============================================================
-# 12. FALLBACKS - DEVEM SER AS ÚLTIMAS ROTAS DO ARQUIVO
+# 13. FALLBACKS - DEVEM SER AS ÚLTIMAS ROTAS DO ARQUIVO
 # ============================================================
 
 @app.api_route("/api/graph/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
