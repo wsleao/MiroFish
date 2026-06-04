@@ -1,191 +1,102 @@
 import service, { requestWithRetry } from './index'
 
-/**
- * 创建模拟
- * @param {Object} data - { project_id, graph_id?, enable_twitter?, enable_reddit? }
- */
-export const createSimulation = (data) => {
-  const payload = {
-    ...data,
-    enable_twitter: false,
-    enable_reddit: false
+const summaryFromConfig = (config = {}) => ({
+  total_agents: config.agent_configs?.length || config.agents?.length || config.personas?.length || config.total_agents || 0,
+  simulation_hours: config.time_config?.total_simulation_hours || config.rounds || 0,
+  initial_posts_count: config.event_config?.initial_posts?.length || 0,
+  hot_topics_count: config.event_config?.hot_topics?.length || 0,
+  has_twitter_config: Boolean(config.twitter_config),
+  has_reddit_config: Boolean(config.reddit_config),
+  generated_at: config.generated_at,
+  llm_model: config.llm_model || config.model || config.mode
+})
+
+const normalizeRealtimeConfig = (res, simulationId) => {
+  if (!res?.success) return res
+
+  const payload = res.data || {}
+
+  if (payload.config_generated && payload.config) {
+    return res
   }
+
+  const config = res.config || payload
+  const looksLikeConfig = Boolean(
+    res.config_generated ||
+    payload.config_generated ||
+    config.time_config ||
+    config.agent_configs ||
+    config.agents ||
+    config.personas
+  )
+
+  if (!looksLikeConfig) return res
+
+  return {
+    ...res,
+    data: {
+      simulation_id: config.simulation_id || res.simulation_id || simulationId,
+      status: 'completed',
+      generation_stage: 'completed',
+      is_generating: false,
+      config_generated: true,
+      config_ready: true,
+      ready: true,
+      done: true,
+      summary: res.summary || payload.summary || summaryFromConfig(config),
+      config
+    }
+  }
+}
+
+export const createSimulation = (data) => {
+  const payload = { ...data, enable_twitter: false, enable_reddit: false }
   return requestWithRetry(() => service.post('/api/simulation/create', payload), 3, 1000)
 }
 
-/**
- * 准备模拟环境（异步任务）
- * @param {Object} data - { simulation_id, entity_types?, use_llm_for_profiles?, parallel_profile_count?, force_regenerate? }
- */
-export const prepareSimulation = (data) => {
-  return requestWithRetry(() => service.post('/api/simulation/prepare', data), 3, 1000)
-}
+export const prepareSimulation = (data) => requestWithRetry(() => service.post('/api/simulation/prepare', data), 3, 1000)
+export const getPrepareStatus = (data) => service.post('/api/simulation/prepare/status', data)
+export const getSimulation = (simulationId) => service.get(`/api/simulation/${simulationId}`)
 
-/**
- * 查询准备任务进度
- * @param {Object} data - { task_id?, simulation_id? }
- */
-export const getPrepareStatus = (data) => {
-  return service.post('/api/simulation/prepare/status', data)
-}
-
-/**
- * 获取模拟状态
- * @param {string} simulationId
- */
-export const getSimulation = (simulationId) => {
-  return service.get(`/api/simulation/${simulationId}`)
-}
-
-/**
- * 获取模拟的 Agent Profiles
- * @param {string} simulationId
- * @param {string|null} platform - optional platform. Omit for internal/fallback mode.
- */
 export const getSimulationProfiles = (simulationId, platform = null) => {
   const options = platform ? { params: { platform } } : undefined
   return service.get(`/api/simulation/${simulationId}/profiles`, options)
 }
 
-/**
- * 实时获取生成中的 Agent Profiles
- * @param {string} simulationId
- */
 export const getSimulationProfilesRealtime = (simulationId) => {
   return service.get(`/api/simulation/${simulationId}/profiles/realtime`)
 }
 
-/**
- * 获取模拟配置
- * @param {string} simulationId
- */
-export const getSimulationConfig = (simulationId) => {
-  return service.get(`/api/simulation/${simulationId}/config`)
+export const getSimulationConfig = (simulationId) => service.get(`/api/simulation/${simulationId}/config`)
+
+export const getSimulationConfigRealtime = async (simulationId) => {
+  const res = await service.get(`/api/simulation/${simulationId}/config/realtime`)
+  return normalizeRealtimeConfig(res, simulationId)
 }
 
-/**
- * 实时获取生成中的模拟配置
- * @param {string} simulationId
- * @returns {Promise} 返回配置信息，包含元数据和配置内容
- */
-export const getSimulationConfigRealtime = (simulationId) => {
-  return service.get(`/api/simulation/${simulationId}/config/realtime`)
-}
-
-/**
- * 列出所有模拟
- * @param {string} projectId - 可选，按项目ID过滤
- */
 export const listSimulations = (projectId) => {
   const params = projectId ? { project_id: projectId } : {}
   return service.get('/api/simulation/list', { params })
 }
 
-/**
- * 启动模拟
- * @param {Object} data - { simulation_id, platform?, max_rounds?, enable_graph_memory_update? }
- */
-export const startSimulation = (data) => {
-  return requestWithRetry(() => service.post('/api/simulation/start', data), 3, 1000)
-}
+export const startSimulation = (data) => requestWithRetry(() => service.post('/api/simulation/start', data), 3, 1000)
+export const stopSimulation = (data) => service.post('/api/simulation/stop', data)
+export const getRunStatus = (simulationId) => service.get(`/api/simulation/${simulationId}/run-status`)
+export const getRunStatusDetail = (simulationId) => service.get(`/api/simulation/${simulationId}/run-status/detail`)
 
-/**
- * 停止模拟
- * @param {Object} data - { simulation_id }
- */
-export const stopSimulation = (data) => {
-  return service.post('/api/simulation/stop', data)
-}
-
-/**
- * 获取模拟运行实时状态
- * @param {string} simulationId
- */
-export const getRunStatus = (simulationId) => {
-  return service.get(`/api/simulation/${simulationId}/run-status`)
-}
-
-/**
- * 获取模拟运行详细状态（包含最近动作）
- * @param {string} simulationId
- */
-export const getRunStatusDetail = (simulationId) => {
-  return service.get(`/api/simulation/${simulationId}/run-status/detail`)
-}
-
-/**
- * 获取模拟中的帖子
- * @param {string} simulationId
- * @param {string} platform - default internal mode
- * @param {number} limit - 返回数量
- * @param {number} offset - 偏移量
- */
 export const getSimulationPosts = (simulationId, platform = 'internal', limit = 50, offset = 0) => {
-  return service.get(`/api/simulation/${simulationId}/posts`, {
-    params: { platform, limit, offset }
-  })
+  return service.get(`/api/simulation/${simulationId}/posts`, { params: { platform, limit, offset } })
 }
 
-/**
- * 获取模拟时间线（按轮次汇总）
- * @param {string} simulationId
- * @param {number} startRound - 起始轮次
- * @param {number} endRound - 结束轮次
- */
 export const getSimulationTimeline = (simulationId, startRound = 0, endRound = null) => {
   const params = { start_round: startRound }
-  if (endRound !== null) {
-    params.end_round = endRound
-  }
+  if (endRound !== null) params.end_round = endRound
   return service.get(`/api/simulation/${simulationId}/timeline`, { params })
 }
 
-/**
- * 获取Agent统计信息
- * @param {string} simulationId
- */
-export const getAgentStats = (simulationId) => {
-  return service.get(`/api/simulation/${simulationId}/agent-stats`)
-}
-
-/**
- * 获取模拟动作历史
- * @param {string} simulationId
- * @param {Object} params - { limit, offset, platform, agent_id, round_num }
- */
-export const getSimulationActions = (simulationId, params = {}) => {
-  return service.get(`/api/simulation/${simulationId}/actions`, { params })
-}
-
-/**
- * 关闭模拟环境（优雅退出）
- * @param {Object} data - { simulation_id, timeout? }
- */
-export const closeSimulationEnv = (data) => {
-  return service.post('/api/simulation/close-env', data)
-}
-
-/**
- * 获取模拟环境状态
- * @param {Object} data - { simulation_id }
- */
-export const getEnvStatus = (data) => {
-  return service.post('/api/simulation/env-status', data)
-}
-
-/**
- * 批量采访 Agent
- * @param {Object} data - { simulation_id, interviews: [{ agent_id, prompt }] }
- */
-export const interviewAgents = (data) => {
-  return requestWithRetry(() => service.post('/api/simulation/interview/batch', data), 3, 1000)
-}
-
-/**
- * 获取历史模拟列表（带项目详情）
- * 用于首页历史项目展示
- * @param {number} limit - 返回数量限制
- */
-export const getSimulationHistory = (limit = 20) => {
-  return service.get('/api/simulation/history', { params: { limit } })
-}
+export const getAgentStats = (simulationId) => service.get(`/api/simulation/${simulationId}/agent-stats`)
+export const getSimulationActions = (simulationId, params = {}) => service.get(`/api/simulation/${simulationId}/actions`, { params })
+export const closeSimulationEnv = (data) => service.post('/api/simulation/close-env', data)
+export const getEnvStatus = (data) => service.post('/api/simulation/env-status', data)
+export const interviewAgents = (data) => requestWithRetry(() => service.post('/api/simulation/interview/batch', data), 3, 1000)
+export const getSimulationHistory = (limit = 20) => service.get('/api/simulation/history', { params: { limit } })
