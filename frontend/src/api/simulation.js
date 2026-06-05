@@ -190,4 +190,5 @@ export const getSimulationActions = (simulationId, params = {}) => service.get(`
 export const closeSimulationEnv = (data) => service.post('/api/simulation/close-env', data)
 export const getEnvStatus = (data) => service.post('/api/simulation/env-status', data)
 export const interviewAgents = (data) => requestWithRetry(() => service.post('/api/simulation/interview/batch', data), 3, 1000)
-export const getSimulationHistory = (limit = 20) => service.get('/api/simulation/history', { params: { limit } })
+export const getSimulationHistory = (limit = 20, query = '') => service.get('/api/simulation/history', { params: { limit, query } })
+export const updateSimulationMetadata = (simulationId, data) => service.post(`/api/simulation/${simulationId}/metadata`, data)
