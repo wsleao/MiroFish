@@ -10,5 +10,5 @@ COPY ./backend /app/backend
 
 EXPOSE 10000
 
-# Executa o wrapper que corrige o contrato do grafo e importa o app principal
-CMD ["sh", "-c", "PYTHONPATH=. uvicorn backend.run_graphfix:app --host 0.0.0.0 --port 10000"]
+# Executa o wrapper C-Level, que mantém o GraphRAG real e separa agentes especialistas do rate limit do Render/Groq
+CMD ["sh", "-c", "PYTHONPATH=. uvicorn backend.run_clevel:app --host 0.0.0.0 --port 10000"]
