@@ -1,213 +1,77 @@
 <template>
-  <div class="home-container">
-    <!-- 顶部导航栏 -->
-    <nav class="navbar">
-      <div class="nav-brand">MIROFISH</div>
-      <div class="nav-links">
-        <LanguageSwitcher />
-        <a href="https://github.com/666ghj/MiroFish" target="_blank" class="github-link">
-          {{ $t('nav.visitGithub') }} <span class="arrow">↗</span>
-        </a>
-      </div>
-    </nav>
+  <div class="nsc-page">
+    <aside class="sidebar">
+      <div class="brand"><div class="logo">NSC</div><div><strong>Novix Simulation Core</strong><span>Simulation SaaS</span></div></div>
+      <nav>
+        <button class="active">Nova simulação</button>
+        <button @click="scrollToHistory">Últimas simulações</button>
+        <button>Fontes de dados</button>
+        <button>Agentes</button>
+        <button>Configurações</button>
+      </nav>
+      <div class="note"><strong>Projeto pessoal</strong><span>Independente da SCADIAgro</span></div>
+    </aside>
 
-    <div class="main-content">
-      <!-- 上半部分：Hero 区域 -->
-      <section class="hero-section">
-        <div class="hero-left">
-          <div class="tag-row">
-            <span class="orange-tag">{{ $t('home.tagline') }}</span>
-            <span class="version-text">{{ $t('home.version') }}</span>
-          </div>
-          
-          <h1 class="main-title">
-            {{ $t('home.heroTitle1') }}<br>
-            <span class="gradient-text">{{ $t('home.heroTitle2') }}</span>
-          </h1>
-          
-          <div class="hero-desc">
-            <p>
-              <i18n-t keypath="home.heroDesc" tag="span">
-                <template #brand><span class="highlight-bold">{{ $t('home.heroDescBrand') }}</span></template>
-                <template #agentScale><span class="highlight-orange">{{ $t('home.heroDescAgentScale') }}</span></template>
-                <template #optimalSolution><span class="highlight-code">{{ $t('home.heroDescOptimalSolution') }}</span></template>
-              </i18n-t>
-            </p>
-            <p class="slogan-text">
-              {{ $t('home.slogan') }}<span class="blinking-cursor">_</span>
-            </p>
-          </div>
-           
-          <div class="decoration-square"></div>
+    <main class="content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Decision Simulation Platform</p>
+          <h1>Simule decisões com dados de qualquer fonte</h1>
         </div>
-        
-        <div class="hero-right">
-          <!-- Logo 区域 -->
-          <div class="logo-container">
-            <img src="../assets/logo/Norvix sem fundo.png" alt="MiroFish Logo" class="hero-logo" />
-          </div>
-          
-          <button class="scroll-down-btn" @click="scrollToBottom">
-            ↓
-          </button>
+        <button class="logout" @click="logout">Sair</button>
+      </header>
+
+      <section class="hero">
+        <div>
+          <span class="pill">NSC Novix Simulation Core</span>
+          <h2>Simulação multiagente para qualquer segmento</h2>
+          <p>Conecte arquivos, APIs, links, textos, bancos de dados e webhooks para gerar cenários, riscos, consenso entre agentes e recomendações executivas.</p>
         </div>
+        <div class="metrics"><div><strong>Multi-fonte</strong><span>entrada flexível</span></div><div><strong>SaaS</strong><span>acesso protegido</span></div><div><strong>GraphRAG</strong><span>contexto explicável</span></div></div>
       </section>
 
-      <!-- 下半部分：双栏布局 -->
-      <section class="dashboard-section">
-        <!-- 左栏：状态与步骤 -->
-        <div class="left-panel">
-          <div class="panel-header">
-            <span class="status-dot">■</span> {{ $t('home.systemStatus') }}
-          </div>
-          
-          <h2 class="section-title">{{ $t('home.systemReady') }}</h2>
-          <p class="section-desc">
-            {{ $t('home.systemReadyDesc') }}
-          </p>
-          
-          <!-- 数据指标卡片 -->
-          <div class="metrics-row">
-            <div class="metric-card">
-              <div class="metric-value">{{ $t('home.metricLowCost') }}</div>
-              <div class="metric-label">{{ $t('home.metricLowCostDesc') }}</div>
-            </div>
-            <div class="metric-card">
-              <div class="metric-value">{{ $t('home.metricHighAvail') }}</div>
-              <div class="metric-label">{{ $t('home.metricHighAvailDesc') }}</div>
-            </div>
+      <section class="grid">
+        <form class="card" @submit.prevent="startSimulation">
+          <div class="title"><span>01</span><div><h3>Configurar simulação</h3><p>Defina o objetivo e as fontes que alimentarão os agentes.</p></div></div>
+
+          <label>Nome da simulação<input v-model="form.projectName" placeholder="Ex.: Expansão comercial, novo produto, risco financeiro" /></label>
+          <label>Objetivo da simulação<textarea v-model="form.requirement" rows="6" placeholder="Descreva a decisão, hipóteses, restrições e perguntas que os agentes devem responder."></textarea></label>
+
+          <div class="tabs">
+            <button type="button" v-for="item in sourceTypes" :key="item.id" :class="{active: activeSource === item.id}" @click="activeSource = item.id">{{ item.label }}</button>
           </div>
 
-          <!-- 项目模拟步骤介绍 (新增区域) -->
-          <div class="steps-container">
-            <div class="steps-header">
-               <span class="diamond-icon">◇</span> {{ $t('home.workflowSequence') }}
+          <div class="source-box">
+            <div v-if="activeSource === 'files'" class="upload" :class="{over: isDragOver}" @dragover.prevent="isDragOver = true" @dragleave.prevent="isDragOver = false" @drop.prevent="handleDrop" @click="triggerFileInput">
+              <input ref="fileInput" type="file" multiple accept=".pdf,.md,.txt,.csv,.json,.xlsx" @change="handleFileSelect" hidden />
+              <div v-if="!files.length"><strong>Arraste arquivos ou clique para selecionar</strong><span>PDF, TXT, MD, CSV, JSON, XLSX</span></div>
+              <div v-else class="file-list"><div v-for="(file, index) in files" :key="index" class="file-item"><span>{{ file.name }}</span><button type="button" @click.stop="removeFile(index)">×</button></div></div>
             </div>
-            <div class="workflow-list">
-              <div class="workflow-item">
-                <span class="step-num">01</span>
-                <div class="step-info">
-                  <div class="step-title">{{ $t('home.step01Title') }}</div>
-                  <div class="step-desc">{{ $t('home.step01Desc') }}</div>
-                </div>
-              </div>
-              <div class="workflow-item">
-                <span class="step-num">02</span>
-                <div class="step-info">
-                  <div class="step-title">{{ $t('home.step02Title') }}</div>
-                  <div class="step-desc">{{ $t('home.step02Desc') }}</div>
-                </div>
-              </div>
-              <div class="workflow-item">
-                <span class="step-num">03</span>
-                <div class="step-info">
-                  <div class="step-title">{{ $t('home.step03Title') }}</div>
-                  <div class="step-desc">{{ $t('home.step03Desc') }}</div>
-                </div>
-              </div>
-              <div class="workflow-item">
-                <span class="step-num">04</span>
-                <div class="step-info">
-                  <div class="step-title">{{ $t('home.step04Title') }}</div>
-                  <div class="step-desc">{{ $t('home.step04Desc') }}</div>
-                </div>
-              </div>
-              <div class="workflow-item">
-                <span class="step-num">05</span>
-                <div class="step-info">
-                  <div class="step-title">{{ $t('home.step05Title') }}</div>
-                  <div class="step-desc">{{ $t('home.step05Desc') }}</div>
-                </div>
-              </div>
-            </div>
+
+            <label v-else-if="activeSource === 'text'">Texto livre<textarea v-model="sources.text" rows="5" placeholder="Cole texto, briefing, notícia, ata ou transcrição."></textarea></label>
+            <label v-else-if="activeSource === 'url'">Link<input v-model="sources.url" placeholder="https://exemplo.com/fonte-de-dados" /></label>
+            <div v-else-if="activeSource === 'api'" class="two"><label>Nome da API<input v-model="sources.apiName" placeholder="ERP, CRM, BI..." /></label><label>Base URL<input v-model="sources.apiUrl" placeholder="https://api.exemplo.com" /></label><label>Endpoint<input v-model="sources.apiEndpoint" placeholder="/metrics" /></label><label>Autenticação<input v-model="sources.apiAuth" placeholder="API key, OAuth, Bearer" /></label></div>
+            <div v-else-if="activeSource === 'database'" class="two"><label>Banco<input v-model="sources.dbLabel" placeholder="PostgreSQL, SQL Server..." /></label><label>Schema/Dataset<input v-model="sources.dbSchema" placeholder="public, analytics..." /></label><label class="full">Observações<textarea v-model="sources.dbNotes" rows="3" placeholder="Tabelas, regras de acesso e permissões."></textarea></label></div>
+            <div v-else-if="activeSource === 'webhook'" class="two"><label>URL do webhook<input v-model="sources.webhookUrl" placeholder="https://app.com/webhook/nsc" /></label><label>Evento<input v-model="sources.webhookEvent" placeholder="pedido.criado, alerta.risco" /></label></div>
           </div>
-        </div>
 
-        <!-- 右栏：交互控制台 -->
-        <div class="right-panel">
-          <div class="console-box">
-            <!-- 上传区域 -->
-            <div class="console-section">
-              <div class="console-header">
-                <span class="console-label">{{ $t('home.realitySeed') }}</span>
-                <span class="console-meta">{{ $t('home.supportedFormats') }}</span>
-              </div>
-              
-              <div 
-                class="upload-zone"
-                :class="{ 'drag-over': isDragOver, 'has-files': files.length > 0 }"
-                @dragover.prevent="handleDragOver"
-                @dragleave.prevent="handleDragLeave"
-                @drop.prevent="handleDrop"
-                @click="triggerFileInput"
-              >
-                <input
-                  ref="fileInput"
-                  type="file"
-                  multiple
-                  accept=".pdf,.md,.txt"
-                  @change="handleFileSelect"
-                  style="display: none"
-                  :disabled="loading"
-                />
-                
-                <div v-if="files.length === 0" class="upload-placeholder">
-                  <div class="upload-icon">↑</div>
-                  <div class="upload-title">{{ $t('home.dragToUpload') }}</div>
-                  <div class="upload-hint">{{ $t('home.orBrowse') }}</div>
-                </div>
-                
-                <div v-else class="file-list">
-                  <div v-for="(file, index) in files" :key="index" class="file-item">
-                    <span class="file-icon">📄</span>
-                    <span class="file-name">{{ file.name }}</span>
-                    <button @click.stop="removeFile(index)" class="remove-btn">×</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- 分割线 -->
-            <div class="console-divider">
-              <span>{{ $t('home.inputParams') }}</span>
-            </div>
-
-            <!-- 输入区域 -->
-            <div class="console-section">
-              <div class="console-header">
-                <span class="console-label">{{ $t('home.simulationPrompt') }}</span>
-              </div>
-              <div class="input-wrapper">
-                <textarea
-                  v-model="formData.simulationRequirement"
-                  class="code-input"
-                  :placeholder="$t('home.promptPlaceholder')"
-                  rows="6"
-                  :disabled="loading"
-                ></textarea>
-                <div class="model-badge">{{ $t('home.engineBadge') }}</div>
-              </div>
-            </div>
-
-            <!-- 启动按钮 -->
-            <div class="console-section btn-section">
-              <button 
-                class="start-engine-btn"
-                @click="startSimulation"
-                :disabled="!canSubmit || loading"
-              >
-                <span v-if="!loading">{{ $t('home.startEngine') }}</span>
-                <span v-else>{{ $t('home.initializing') }}</span>
-                <span class="btn-arrow">→</span>
-              </button>
-            </div>
+          <div class="config">
+            <label>Agentes<select v-model.number="form.agentCount"><option :value="4">4</option><option :value="6">6</option><option :value="8">8</option></select></label>
+            <label>Rodadas<select v-model.number="form.rounds"><option :value="3">3</option><option :value="5">5</option><option :value="8">8</option></select></label>
+            <label>Segmento<input v-model="form.segment" placeholder="Qualquer segmento" /></label>
           </div>
-        </div>
+
+          <button class="primary" :disabled="!canSubmit" type="submit">Iniciar simulação <strong>→</strong></button>
+        </form>
+
+        <aside class="info">
+          <div class="info-card"><h3>Fluxo NSC</h3><ol><li>Conectar fontes</li><li>Gerar ontologia</li><li>Construir GraphRAG</li><li>Simular cenários</li><li>Gerar recomendação</li></ol></div>
+          <div class="info-card blue"><h3>SaaS por design</h3><p>Login, histórico, workspace, permissões e multi-tenant serão evoluídos sobre persistência em banco.</p></div>
+        </aside>
       </section>
 
-      <!-- 历史项目数据库 -->
-      <HistoryDatabase />
-    </div>
+      <section id="history" class="history"><div class="heading"><div><p class="eyebrow">Histórico</p><h2>Últimas simulações</h2></div><span>Consulta rápida das execuções recentes</span></div><HistoryDatabase /></section>
+    </main>
   </div>
 </template>
 
@@ -215,739 +79,43 @@
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import HistoryDatabase from '../components/HistoryDatabase.vue'
-import LanguageSwitcher from '../components/LanguageSwitcher.vue'
+import { setPendingUpload } from '../store/pendingUpload.js'
+import { clearAuthSession } from '../store/auth.js'
 
 const router = useRouter()
-
-// 表单数据
-const formData = ref({
-  simulationRequirement: ''
-})
-
-// 文件列表
+const form = ref({ projectName: '', requirement: '', agentCount: 6, rounds: 3, segment: '' })
 const files = ref([])
-
-// 状态
-const loading = ref(false)
-const error = ref('')
-const isDragOver = ref(false)
-
-// 文件输入引用
 const fileInput = ref(null)
+const isDragOver = ref(false)
+const activeSource = ref('files')
+const sourceTypes = [{id:'files', label:'Arquivos'}, {id:'text', label:'Texto'}, {id:'url', label:'Link'}, {id:'api', label:'API'}, {id:'database', label:'Banco'}, {id:'webhook', label:'Webhook'}]
+const sources = ref({ text: '', url: '', apiName: '', apiUrl: '', apiEndpoint: '', apiAuth: '', dbLabel: '', dbSchema: '', dbNotes: '', webhookUrl: '', webhookEvent: '' })
 
-// 计算属性:是否可以提交
-const canSubmit = computed(() => {
-  return formData.value.simulationRequirement.trim() !== '' && files.value.length > 0
-})
-
-// 触发文件选择
-const triggerFileInput = () => {
-  if (!loading.value) {
-    fileInput.value?.click()
-  }
+const buildDataSources = () => {
+  const list = []
+  if (files.value.length) list.push({ type: 'files', names: files.value.map(f => f.name), count: files.value.length })
+  if (sources.value.text.trim()) list.push({ type: 'text', content: sources.value.text.trim() })
+  if (sources.value.url.trim()) list.push({ type: 'url', url: sources.value.url.trim() })
+  if (sources.value.apiUrl.trim() || sources.value.apiEndpoint.trim()) list.push({ type: 'api', name: sources.value.apiName, baseUrl: sources.value.apiUrl, endpoint: sources.value.apiEndpoint, authHint: sources.value.apiAuth })
+  if (sources.value.dbLabel.trim() || sources.value.dbSchema.trim()) list.push({ type: 'database', label: sources.value.dbLabel, schema: sources.value.dbSchema, notes: sources.value.dbNotes })
+  if (sources.value.webhookUrl.trim()) list.push({ type: 'webhook', url: sources.value.webhookUrl, event: sources.value.webhookEvent })
+  return list
 }
-
-// 处理文件选择
-const handleFileSelect = (event) => {
-  const selectedFiles = Array.from(event.target.files)
-  addFiles(selectedFiles)
-}
-
-// 处理拖拽相关
-const handleDragOver = (e) => {
-  if (!loading.value) {
-    isDragOver.value = true
-  }
-}
-
-const handleDragLeave = (e) => {
-  isDragOver.value = false
-}
-
-const handleDrop = (e) => {
-  isDragOver.value = false
-  if (loading.value) return
-  
-  const droppedFiles = Array.from(e.dataTransfer.files)
-  addFiles(droppedFiles)
-}
-
-// 添加文件
-const addFiles = (newFiles) => {
-  const validFiles = newFiles.filter(file => {
-    const ext = file.name.split('.').pop().toLowerCase()
-    return ['pdf', 'md', 'txt'].includes(ext)
-  })
-  files.value.push(...validFiles)
-}
-
-// 移除文件
-const removeFile = (index) => {
-  files.value.splice(index, 1)
-}
-
-// 滚动到底部
-const scrollToBottom = () => {
-  window.scrollTo({
-    top: document.body.scrollHeight,
-    behavior: 'smooth'
-  })
-}
-
-// 开始模拟 - 立即跳转，API调用在Process页面进行
+const canSubmit = computed(() => form.value.requirement.trim() && buildDataSources().length > 0)
+const triggerFileInput = () => fileInput.value?.click()
+const handleFileSelect = e => addFiles(Array.from(e.target.files || []))
+const handleDrop = e => { isDragOver.value = false; addFiles(Array.from(e.dataTransfer.files || [])) }
+const addFiles = newFiles => files.value.push(...newFiles)
+const removeFile = index => files.value.splice(index, 1)
 const startSimulation = () => {
-  if (!canSubmit.value || loading.value) return
-  
-  // 存储待上传的数据
-  import('../store/pendingUpload.js').then(({ setPendingUpload }) => {
-    setPendingUpload(files.value, formData.value.simulationRequirement)
-    
-    // 立即跳转到Process页面（使用特殊标识表示新建项目）
-    router.push({
-      name: 'Process',
-      params: { projectId: 'new' }
-    })
-  })
+  const dataSources = buildDataSources()
+  setPendingUpload(files.value, form.value.requirement, { projectName: form.value.projectName || 'Nova simulação NSC', dataSources, simulationConfig: { agentCount: form.value.agentCount, rounds: form.value.rounds, segment: form.value.segment, sourceMode: dataSources.map(s => s.type).join(',') } })
+  router.push({ name: 'Process', params: { projectId: 'new' } })
 }
+const scrollToHistory = () => document.getElementById('history')?.scrollIntoView({ behavior: 'smooth' })
+const logout = () => { clearAuthSession(); router.push({ name: 'Login' }) }
 </script>
 
 <style scoped>
-/* 全局变量与重置 */
-:root {
-  --black: #000000;
-  --white: #FFFFFF;
-  --orange: #FF4500;
-  --gray-light: #F5F5F5;
-  --gray-text: #666666;
-  --border: #E5E5E5;
-  /* 
-    使用 Space Grotesk 作为主要标题字体，JetBrains Mono 作为代码/标签字体
-    确保已在 index.html 引入这些 Google Fonts 
-  */
-  --font-mono: 'JetBrains Mono', monospace;
-  --font-sans: 'Space Grotesk', 'Noto Sans SC', system-ui, sans-serif;
-  --font-cn: 'Noto Sans SC', system-ui, sans-serif;
-}
-
-.home-container {
-  min-height: 100vh;
-  background: var(--white);
-  font-family: var(--font-sans);
-  color: var(--black);
-}
-
-/* 顶部导航 */
-.navbar {
-  height: 60px;
-  background: var(--black);
-  color: var(--white);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0 40px;
-}
-
-.nav-brand {
-  font-family: var(--font-mono);
-  font-weight: 800;
-  letter-spacing: 1px;
-  font-size: 1.2rem;
-}
-
-.nav-links {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.github-link {
-  color: var(--white);
-  text-decoration: none;
-  font-family: var(--font-mono);
-  font-size: 0.9rem;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  transition: opacity 0.2s;
-}
-
-.github-link:hover {
-  opacity: 0.8;
-}
-
-.arrow {
-  font-family: sans-serif;
-}
-
-/* 主要内容区 */
-.main-content {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 60px 40px;
-}
-
-/* Hero 区域 */
-.hero-section {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 80px;
-  position: relative;
-}
-
-.hero-left {
-  flex: 1;
-  padding-right: 60px;
-}
-
-.tag-row {
-  display: flex;
-  align-items: center;
-  gap: 15px;
-  margin-bottom: 25px;
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-}
-
-.orange-tag {
-  background: var(--orange);
-  color: var(--white);
-  padding: 4px 10px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  font-size: 0.75rem;
-}
-
-.version-text {
-  color: #999;
-  font-weight: 500;
-  letter-spacing: 0.5px;
-}
-
-.main-title {
-  font-size: 4.5rem;
-  line-height: 1.2;
-  font-weight: 500;
-  margin: 0 0 40px 0;
-  letter-spacing: -2px;
-  color: var(--black);
-}
-
-.gradient-text {
-  background: linear-gradient(90deg, #000000 0%, #444444 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  display: inline-block;
-}
-
-.hero-desc {
-  font-size: 1.05rem;
-  line-height: 1.8;
-  color: var(--gray-text);
-  max-width: 640px;
-  margin-bottom: 50px;
-  font-weight: 400;
-  text-align: justify;
-}
-
-.hero-desc p {
-  margin-bottom: 1.5rem;
-}
-
-.highlight-bold {
-  color: var(--black);
-  font-weight: 700;
-}
-
-.highlight-orange {
-  color: var(--orange);
-  font-weight: 700;
-  font-family: var(--font-mono);
-}
-
-.highlight-code {
-  background: rgba(0, 0, 0, 0.05);
-  padding: 2px 6px;
-  border-radius: 2px;
-  font-family: var(--font-mono);
-  font-size: 0.9em;
-  color: var(--black);
-  font-weight: 600;
-}
-
-.slogan-text {
-  font-size: 1.2rem;
-  font-weight: 520;
-  color: var(--black);
-  letter-spacing: 1px;
-  border-left: 3px solid var(--orange);
-  padding-left: 15px;
-  margin-top: 20px;
-}
-
-.blinking-cursor {
-  color: var(--orange);
-  animation: blink 1s step-end infinite;
-  font-weight: 700;
-}
-
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
-
-.decoration-square {
-  width: 16px;
-  height: 16px;
-  background: var(--orange);
-}
-
-.hero-right {
-  flex: 0.8;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  align-items: flex-end;
-}
-
-.logo-container {
-  width: 100%;
-  display: flex;
-  justify-content: flex-end;
-  padding-right: 40px;
-}
-
-.hero-logo {
-  max-width: 500px; /* 调整logo大小 */
-  width: 100%;
-}
-
-.scroll-down-btn {
-  width: 40px;
-  height: 40px;
-  border: 1px solid var(--border);
-  background: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  color: var(--orange);
-  font-size: 1.2rem;
-  transition: all 0.2s;
-}
-
-.scroll-down-btn:hover {
-  border-color: var(--orange);
-}
-
-/* Dashboard 双栏布局 */
-.dashboard-section {
-  display: flex;
-  gap: 60px;
-  border-top: 1px solid var(--border);
-  padding-top: 60px;
-  align-items: flex-start;
-}
-
-.dashboard-section .left-panel,
-.dashboard-section .right-panel {
-  display: flex;
-  flex-direction: column;
-}
-
-/* 左侧面板 */
-.left-panel {
-  flex: 0.8;
-}
-
-.panel-header {
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  color: #999;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 20px;
-}
-
-.status-dot {
-  color: var(--orange);
-  font-size: 0.8rem;
-}
-
-.section-title {
-  font-size: 2rem;
-  font-weight: 520;
-  margin: 0 0 15px 0;
-}
-
-.section-desc {
-  color: var(--gray-text);
-  margin-bottom: 25px;
-  line-height: 1.6;
-}
-
-.metrics-row {
-  display: flex;
-  gap: 20px;
-  margin-bottom: 15px;
-}
-
-.metric-card {
-  border: 1px solid var(--border);
-  padding: 20px 30px;
-  min-width: 150px;
-}
-
-.metric-value {
-  font-family: var(--font-mono);
-  font-size: 1.8rem;
-  font-weight: 520;
-  margin-bottom: 5px;
-}
-
-.metric-label {
-  font-size: 0.85rem;
-  color: #999;
-}
-
-/* 项目模拟步骤介绍 */
-.steps-container {
-  border: 1px solid var(--border);
-  padding: 30px;
-  position: relative;
-}
-
-.steps-header {
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  color: #999;
-  margin-bottom: 25px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.diamond-icon {
-  font-size: 1.2rem;
-  line-height: 1;
-}
-
-.workflow-list {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-.workflow-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 20px;
-}
-
-.step-num {
-  font-family: var(--font-mono);
-  font-weight: 700;
-  color: var(--black);
-  opacity: 0.3;
-}
-
-.step-info {
-  flex: 1;
-}
-
-.step-title {
-  font-weight: 520;
-  font-size: 1rem;
-  margin-bottom: 4px;
-}
-
-.step-desc {
-  font-size: 0.85rem;
-  color: var(--gray-text);
-}
-
-/* 右侧交互控制台 */
-.right-panel {
-  flex: 1.2;
-}
-
-.console-box {
-  border: 1px solid #CCC; /* 外部实线 */
-  padding: 8px; /* 内边距形成双重边框感 */
-}
-
-.console-section {
-  padding: 20px;
-}
-
-.console-section.btn-section {
-  padding-top: 0;
-}
-
-.console-header {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 15px;
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  color: #666;
-}
-
-.upload-zone {
-  border: 1px dashed #CCC;
-  height: 200px;
-  overflow-y: auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.3s;
-  background: #FAFAFA;
-}
-
-.upload-zone.has-files {
-  align-items: flex-start;
-}
-
-.upload-zone:hover {
-  background: #F0F0F0;
-  border-color: #999;
-}
-
-.upload-placeholder {
-  text-align: center;
-}
-
-.upload-icon {
-  width: 40px;
-  height: 40px;
-  border: 1px solid #DDD;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 auto 15px;
-  color: #999;
-}
-
-.upload-title {
-  font-weight: 500;
-  font-size: 0.9rem;
-  margin-bottom: 5px;
-}
-
-.upload-hint {
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  color: #999;
-}
-
-.file-list {
-  width: 100%;
-  padding: 15px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.file-item {
-  display: flex;
-  align-items: center;
-  background: var(--white);
-  padding: 8px 12px;
-  border: 1px solid #EEE;
-  font-family: var(--font-mono);
-  font-size: 0.85rem;
-}
-
-.file-name {
-  flex: 1;
-  margin: 0 10px;
-}
-
-.remove-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 1.2rem;
-  color: #999;
-}
-
-.console-divider {
-  display: flex;
-  align-items: center;
-  margin: 10px 0;
-}
-
-.console-divider::before,
-.console-divider::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: #EEE;
-}
-
-.console-divider span {
-  padding: 0 15px;
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  color: #BBB;
-  letter-spacing: 1px;
-}
-
-.input-wrapper {
-  position: relative;
-  border: 1px solid #DDD;
-  background: #FAFAFA;
-}
-
-.code-input {
-  width: 100%;
-  border: none;
-  background: transparent;
-  padding: 20px;
-  font-family: var(--font-mono);
-  font-size: 0.9rem;
-  line-height: 1.6;
-  resize: vertical;
-  outline: none;
-  min-height: 150px;
-}
-
-.model-badge {
-  position: absolute;
-  bottom: 10px;
-  right: 15px;
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  color: #AAA;
-}
-
-.start-engine-btn {
-  width: 100%;
-  background: var(--black);
-  color: var(--white);
-  border: none;
-  padding: 20px;
-  font-family: var(--font-mono);
-  font-weight: 700;
-  font-size: 1.1rem;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  cursor: pointer;
-  transition: all 0.3s ease;
-  letter-spacing: 1px;
-  position: relative;
-  overflow: hidden;
-}
-
-/* 可点击状态（非禁用） */
-.start-engine-btn:not(:disabled) {
-  background: var(--black);
-  border: 1px solid var(--black);
-  animation: pulse-border 2s infinite;
-}
-
-.start-engine-btn:hover:not(:disabled) {
-  background: var(--orange);
-  border-color: var(--orange);
-  transform: translateY(-2px);
-}
-
-.start-engine-btn:active:not(:disabled) {
-  transform: translateY(0);
-}
-
-.start-engine-btn:disabled {
-  background: #E5E5E5;
-  color: #999;
-  cursor: not-allowed;
-  transform: none;
-  border: 1px solid #E5E5E5;
-}
-
-/* 引导动画：微妙的边框脉冲 */
-@keyframes pulse-border {
-  0% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0.2); }
-  70% { box-shadow: 0 0 0 6px rgba(0, 0, 0, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
-}
-
-/* 响应式适配 */
-@media (max-width: 1024px) {
-  .dashboard-section {
-    flex-direction: column;
-  }
-  
-  .hero-section {
-    flex-direction: column;
-  }
-  
-  .hero-left {
-    padding-right: 0;
-    margin-bottom: 40px;
-  }
-  
-  .hero-logo {
-    max-width: 200px;
-    margin-bottom: 20px;
-  }
-}
-</style>
-
-<style>
-/* English locale adjustments (unscoped to target html[lang]) */
-html[lang="en"] .main-title {
-  font-size: 3.5rem;
-  font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  letter-spacing: -1px;
-}
-
-html[lang="en"] .hero-desc {
-  text-align: left;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  letter-spacing: 0;
-}
-
-html[lang="en"] .slogan-text {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  letter-spacing: 0;
-}
-
-html[lang="en"] .tag-row {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-html[lang="en"] .navbar .nav-links {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-/* Left pane: system status + workflow */
-html[lang="en"] .status-section {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-html[lang="en"] .status-section .status-ready {
-  font-size: 1.6rem;
-}
-
-html[lang="en"] .status-section .metric-value {
-  font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  font-size: 1.4rem;
-}
-
-html[lang="en"] .workflow-list .step-title {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-html[lang="en"] .workflow-list .step-desc {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
-  font-size: 0.72rem !important;
-  line-height: 1.4 !important;
-}
-
-html[lang="en"] .workflow-list {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
+.nsc-page{min-height:100vh;display:grid;grid-template-columns:280px 1fr;background:#f6f8fb;color:#111827;font-family:Inter,system-ui,sans-serif}.sidebar{position:sticky;top:0;height:100vh;background:#0b1020;color:#fff;padding:24px;display:flex;flex-direction:column}.brand{display:flex;gap:14px;align-items:center}.logo{width:48px;height:48px;border-radius:16px;background:linear-gradient(135deg,#7c9cff,#00d1b2);color:#07111f;display:grid;place-items:center;font-weight:950}.brand strong{display:block}.brand span,.note span{color:#98a2b3;font-size:12px}nav{display:grid;gap:8px;margin-top:38px}nav button{border:0;text-align:left;padding:13px 14px;border-radius:14px;color:#cbd5e1;background:transparent;font-weight:750;cursor:pointer}nav button.active,nav button:hover{background:rgba(255,255,255,.09);color:#fff}.note{margin-top:auto;padding:16px;border-radius:18px;background:rgba(255,255,255,.08);display:grid;gap:4px}.content{padding:28px;overflow-x:hidden}.topbar{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:24px}.eyebrow{color:#536dfe;text-transform:uppercase;letter-spacing:.14em;font-weight:900;font-size:12px}h1{font-size:clamp(32px,4vw,54px);letter-spacing:-.06em;margin-top:6px}.logout{border:1px solid #d0d5dd;background:#fff;border-radius:12px;padding:11px 14px;font-weight:800;cursor:pointer;color:#b42318}.hero{border-radius:32px;padding:34px;background:linear-gradient(135deg,#111827,#172554);color:#fff;display:grid;grid-template-columns:1.2fr .8fr;gap:28px;box-shadow:0 24px 80px rgba(17,24,39,.18)}.pill{display:inline-flex;padding:8px 12px;background:rgba(255,255,255,.12);border-radius:999px;color:#bfdbfe;font-size:12px;font-weight:900}.hero h2{font-size:44px;letter-spacing:-.05em;margin:14px 0}.hero p{color:#cbd5e1;line-height:1.65}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;align-content:end}.metrics div{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.12);border-radius:22px;padding:18px}.metrics strong{display:block}.metrics span{color:#cbd5e1;font-size:12px}.grid{display:grid;grid-template-columns:minmax(0,1fr)340px;gap:22px;margin-top:22px}.card,.info-card,.history{background:#fff;border:1px solid #e4e7ec;border-radius:28px;padding:24px;box-shadow:0 14px 40px rgba(16,24,40,.05)}.title{display:flex;gap:16px;margin-bottom:22px}.title span{width:42px;height:42px;border-radius:14px;background:#eef4ff;color:#3538cd;display:grid;place-items:center;font-weight:950}.title h3,.info-card h3,.heading h2{margin:0 0 6px;font-size:24px;letter-spacing:-.04em}.title p,.info-card p,.heading span{color:#667085;line-height:1.5}label{display:grid;gap:8px;font-size:13px;color:#344054;font-weight:850;margin-bottom:16px}input,textarea,select{width:100%;border:1px solid #d0d5dd;border-radius:14px;padding:13px 14px;font:inherit;outline:none;background:#fff}textarea{resize:vertical}input:focus,textarea:focus,select:focus{border-color:#536dfe;box-shadow:0 0 0 4px rgba(83,109,254,.12)}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}.tabs button{border:1px solid #e4e7ec;background:#fff;border-radius:999px;padding:10px 13px;font-weight:850;cursor:pointer;color:#475467}.tabs button.active{background:#111827;color:#fff;border-color:#111827}.source-box{border:1px dashed #cbd5e1;background:#f8fafc;border-radius:22px;padding:18px;min-height:150px}.upload{min-height:132px;display:grid;place-items:center;text-align:center;color:#667085;cursor:pointer}.upload strong{display:block;color:#111827;margin-bottom:6px}.over{background:#eef4ff;border-radius:18px}.file-list{width:100%;display:grid;gap:8px}.file-item{display:flex;justify-content:space-between;align-items:center;background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:10px 12px}.file-item button{border:0;background:#fee4e2;color:#b42318;border-radius:8px;width:28px;height:28px;cursor:pointer}.two,.config{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.two .full{grid-column:1/-1}.config{grid-template-columns:160px 140px 1fr;margin:18px 0}.primary{width:100%;border:0;background:#111827;color:#fff;border-radius:18px;padding:16px 18px;display:flex;justify-content:space-between;font-weight:950;font-size:15px;cursor:pointer}.primary:disabled{opacity:.55;cursor:not-allowed}.info{display:grid;gap:16px;align-content:start}.info-card ol{margin:12px 0 0 20px;color:#475467;line-height:2;font-weight:700}.blue{background:#eef4ff;border-color:#c7d7fe}.history{margin-top:22px}.heading{display:flex;justify-content:space-between;align-items:end;margin-bottom:18px}@media(max-width:1100px){.nsc-page{grid-template-columns:1fr}.sidebar{position:static;height:auto}.grid,.hero{grid-template-columns:1fr}.metrics{grid-template-columns:1fr}}@media(max-width:720px){.content{padding:18px}.topbar,.heading{flex-direction:column;align-items:flex-start}.two,.config{grid-template-columns:1fr}}
 </style>
