@@ -5,8 +5,9 @@ It keeps the current simulation engine available while the codebase is being
 migrated from compatibility wrappers to a clean SaaS architecture.
 """
 
-from backend.run_executive import app, cors_json, response_ok
+from backend.run_executive import app, response_ok
 from backend.run import BACKEND_VERSION, utc_now
+from backend.nsc_store import persistence_status
 
 PRODUCT = {
     "name": "NSC Novix Simulation Core",
@@ -47,6 +48,17 @@ async def nsc_data_source_types():
     })
 
 
+@app.get("/api/nsc/persistence-status")
+async def nsc_persistence_status():
+    status = await persistence_status()
+    return response_ok({
+        "status": "ready",
+        "product": PRODUCT["name"],
+        "persistence": status,
+        "generated_at": utc_now(),
+    })
+
+
 @app.get("/api/nsc/refactor-status")
 async def nsc_refactor_status():
     return response_ok({
@@ -59,13 +71,15 @@ async def nsc_refactor_status():
             "executive report wrapper",
             "GraphRAG prompt ontology wrapper",
             "clean NSC backend entrypoint",
+            "PostgreSQL schema draft",
+            "PostgreSQL store helper",
         ],
         "next": [
-            "PostgreSQL persistence for tenants, users, data sources and simulations",
+            "wire simulations into PostgreSQL persistence",
             "unified simulation engine without stacked middleware",
             "structured agent output schema",
             "connector ingestion jobs",
-            "real SaaS permission model",
+            "server-side SaaS permission model",
         ],
         "generated_at": utc_now(),
     })
