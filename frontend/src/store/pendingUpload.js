@@ -13,8 +13,19 @@ const state = reactive({
   isPending: false
 })
 
+function buildSyntheticSourceText(requirement, options = {}) {
+  return [
+    'NSC Novix Simulation Core - contexto multi-fonte',
+    `Projeto: ${options.projectName || 'Nova simulação NSC'}`,
+    `Objetivo: ${requirement || ''}`,
+    `Fontes: ${JSON.stringify(options.dataSources || [])}`,
+    `Configuração: ${JSON.stringify(options.simulationConfig || {})}`
+  ].join('\n')
+}
+
 export function setPendingUpload(files, requirement, options = {}) {
-  state.files = files || []
+  const incomingFiles = files || []
+  state.files = incomingFiles.length ? incomingFiles : [buildSyntheticSourceText(requirement, options)]
   state.simulationRequirement = requirement || ''
   state.projectName = options.projectName || 'Nova simulação NSC'
   state.dataSources = options.dataSources || []
